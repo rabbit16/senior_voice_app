@@ -77,13 +77,15 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace "com.mobilemvp"
+    namespace "com.seniorvoiceapp"
     defaultConfig {
-        applicationId "com.mobilemvp"
+        applicationId "com.seniorvoiceapp"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+        // 开发期允许 http://局域网IP 访问 FastAPI；上线 HTTPS 后改为 false
+        manifestPlaceholders = [usesCleartextTraffic: "true"]
     }
     signingConfigs {
         debug {

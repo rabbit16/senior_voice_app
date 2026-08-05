@@ -1,0 +1,6 @@
+{
+  "apiBaseUrl": "http://192.168.1.100:8000",
+  "apiPrefix": "/api/v1",
+  "timeoutMs": 30000,
+  "comment": "复制为 api.json 后修改。也可打包时传环境变量覆盖：API_BASE_URL=http://10.0.0.8:8000 npm run build:android"
+}

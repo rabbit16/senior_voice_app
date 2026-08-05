@@ -1,97 +1,117 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# 语音问答助手 Senior Voice App
 
-# Getting Started
+这是一个面向老年用户的 Android 手机 App 前端项目，基于 React Native 实现。
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+当前版本是首页 MVP：用户按住大按钮说话，松开后展示模拟结果。项目已整理为可维护结构，方便继续开发前端界面。
 
-## Step 1: Start Metro
+## 快速开始
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+进入项目：
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+```bash
+cd /home/westwell/haolliang.jiang/westwellDoc/app/senior_voice_app
+```
 
-```sh
-# Using npm
+检查 Android 环境：
+
+```bash
+npm run doctor:android
+```
+
+安装依赖（如果 node_modules 不存在）：
+
+```bash
+npm install
+```
+
+代码检查：
+
+```bash
+npm run check
+```
+
+一键生成 Android Debug APK：
+
+```bash
+npm run build:android
+```
+
+APK 输出路径：
+
+```text
+android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+## 运行到安卓手机
+
+1. 手机打开开发者选项和 USB 调试。
+2. USB 连接电脑。
+3. 检查设备：
+
+```bash
+adb devices
+```
+
+4. 启动 Metro：
+
+```bash
 npm start
-
-# OR using Yarn
-yarn start
 ```
 
-## Step 2: Build and run your app
+5. 另开终端运行：
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
-
-### Android
-
-```sh
-# Using npm
-npm run android
-
-# OR using Yarn
-yarn android
+```bash
+./scripts/run_android_device.sh
 ```
 
-### iOS
+## 重要文档
 
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
+换对话或后续维护时，优先阅读：
 
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
-
-```sh
-bundle install
+```text
+docs/PROJECT_CONTEXT.md      项目背景和设计目标
+docs/DESIGN_SYSTEM.md        适老化设计系统
+docs/DEVELOPMENT_GUIDE.md    开发与维护指南
+docs/ROADMAP.md              后续开发路线图
 ```
 
-Then, and every time you update your native dependencies, run:
+## 代码结构
 
-```sh
-bundle exec pod install
+```text
+src/
+  features/
+    home/
+      HomeScreen.tsx
+      components/
+        LanguageToggle.tsx
+        ResultCard.tsx
+        VoiceInputButton.tsx
+  shared/
+    i18n/
+      messages.ts
+  theme/
+    tokens.ts
+scripts/
+  build_android_apk.sh
+  check_android_env.sh
+  run_android_device.sh
+docs/
+  PROJECT_CONTEXT.md
+  DESIGN_SYSTEM.md
+  DEVELOPMENT_GUIDE.md
+  ROADMAP.md
 ```
 
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
+## 维护原则
 
-```sh
-# Using npm
-npm run ios
+- 改颜色、字号、间距：优先改 `src/theme/tokens.ts`
+- 改中文/英文文案：改 `src/shared/i18n/messages.ts`
+- 改首页：改 `src/features/home/HomeScreen.tsx`
+- 改首页内组件：改 `src/features/home/components/`
+- 改完后运行：`npm run check && npm run build:android`
 
-# OR using Yarn
-yarn ios
-```
+## 当前限制
 
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
-
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
-
-## Step 3: Modify your app
-
-Now that you have successfully run the app, let's make changes!
-
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
-
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
-
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
-
-## Congratulations! :tada:
-
-You've successfully run and modified your React Native App. :partying_face:
-
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+- 当前语音识别是模拟结果，还没有接入真实语音服务。
+- 当前仅实现首页，没有完整设置页、历史记录页。
+- 当前脚本生成的是 Debug APK，正式发布需要配置 release 签名。

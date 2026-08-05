@@ -1,0 +1,47 @@
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  background: #dbeafe;
+  font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+#root {
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* 桌面预览限制宽度；手机/模拟器（≤480）铺满，避免两侧空白导致“不适配” */
+#root > div {
+  width: 100%;
+  max-width: 430px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.18);
+}
+
+@media (max-width: 480px) {
+  body {
+    background: #f0f9ff;
+  }
+
+  #root > div {
+    max-width: none;
+    box-shadow: none;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
