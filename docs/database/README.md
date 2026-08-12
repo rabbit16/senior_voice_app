@@ -1,9 +1,11 @@
 # 数据库表结构说明（MySQL 8.0+）
 
 对应 SQL：[`schema.sql`](./schema.sql)  
+档案页种子数据：[`seed_archive.sql`](./seed_archive.sql)  
 对应 ER 图（中文 Mermaid，可导入 draw.io）：[`er.mmd`](./er.mmd)  
 对应设计与用法说明：[`DESIGN.md`](./DESIGN.md)  
-对应接口：[`../API.md`](../API.md)
+对应接口：[`../API.md`](../API.md)  
+后端路由示例：[`../backend/archive_routes_example.py`](../backend/archive_routes_example.py)
 
 可直接改 `schema.sql` 字段；改完后建议同步接口文档与 ORM（`src/app/db/models/`）。
 
@@ -70,6 +72,8 @@ report_glossaries （全局配置，不挂 user）
 ```bash
 mysql -u root -p -e "CREATE DATABASE senior_voice DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -u root -p senior_voice < docs/database/schema.sql
+# 档案页联调数据（先改 seed 内 @seed_phone 为登录手机号）
+mysql -u root -p senior_voice < docs/database/seed_archive.sql
 ```
 
 后端连接串（`.env`）：
