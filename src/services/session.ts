@@ -64,5 +64,6 @@ export function setSession(next: AuthSession | null): void {
 }
 
 export function clearSession(): void {
+  // OCR 缓存按 userKey 分桶保留，登出不清空，下次登录同一用户可恢复
   setSession(null);
 }

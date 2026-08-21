@@ -28,6 +28,8 @@ type RequestOptions = {
   token?: string | null;
   formData?: FormData;
   signal?: AbortSignal;
+  /** 不传则用 config/api.json 的 timeoutMs */
+  timeoutMs?: number;
 };
 
 function normalizeErrorBody(
@@ -85,7 +87,8 @@ function buildUrl(path: string, query?: RequestOptions['query']): string {
 export async function apiRequest<T>(options: RequestOptions): Promise<T> {
   const {method = 'GET', path, query, body, token, formData, signal} = options;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), env.timeoutMs);
+  const timeoutMs = options.timeoutMs ?? env.timeoutMs;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   const headers: Record<string, string> = {
     Accept: 'application/json',

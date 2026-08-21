@@ -139,6 +139,7 @@ erDiagram
     medical_archives["就诊单档案 medical_archives"] {
         string id PK "主键"
         string user_id FK "所属用户"
+        string visit_no "就诊号"
         string diagnosis "诊断"
         string medicine "用药"
         date visit_date "就诊日期"
@@ -155,6 +156,7 @@ erDiagram
         string user_id FK "所属用户"
         string image_media_id FK "图片文件"
         string source "camera或album"
+        string visit_no "识别就诊号"
         string diagnosis "识别诊断"
         string medicine "识别用药"
         date visit_date "识别就诊日"

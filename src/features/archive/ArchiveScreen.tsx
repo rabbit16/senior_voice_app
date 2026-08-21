@@ -1,19 +1,23 @@
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import {text} from '../../shared/i18n/messages';
 import BackButton from '../../shared/components/BackButton';
 import {
-  createArchive,
+  getArchive,
   getHealthReport,
+  listArchives,
   listHealthReports,
   listHealthSummaries,
+  ocrArchiveImage,
+  type ArchiveRecord,
   type HealthReportDetail,
   type HealthReportListItem,
   type HealthSummary,
@@ -21,10 +25,69 @@ import {
   type ReportGlossaryItem,
 } from '../../services/archiveApi';
 import {ApiError} from '../../services/http';
-import {getAccessToken} from '../../services/session';
+import {loadLastOcrCache, saveLastOcrCache} from '../../services/ocrCache';
+import {isImagePickCancelled, pickImage} from '../../services/pickImage';
+import {getAccessToken, getSession} from '../../services/session';
 import {colors, radius, spacing, typography} from '../../theme/tokens';
 
-type ViewMode = 'home' | 'reports' | 'detail';
+type ViewMode = 'home' | 'reports' | 'detail' | 'confirm';
+
+type OcrDraft = {
+  diagnosis: string;
+  medicine: string;
+  visit_date: string;
+  visit_no: string;
+  raw_ocr_text: string;
+  document_type: 'visit' | 'exam';
+  patient_name: string;
+  org_name: string;
+  voucher_no: string;
+  report_type: string;
+};
+
+function emptyDraft(): OcrDraft {
+  return {
+    diagnosis: '',
+    medicine: '',
+    visit_date: '',
+    visit_no: '',
+    raw_ocr_text: '',
+    document_type: 'visit',
+    patient_name: '',
+    org_name: '',
+    voucher_no: '',
+    report_type: '',
+  };
+}
+
+function draftFromOcr(result: OcrResult): OcrDraft {
+  return {
+    diagnosis: result.diagnosis || '',
+    medicine: result.medicine || '',
+    visit_date: (result.visit_date || '').slice(0, 10),
+    visit_no: result.visit_no || '',
+    raw_ocr_text: result.raw_ocr_text || '',
+    document_type: result.document_type === 'exam' ? 'exam' : 'visit',
+    patient_name: result.patient_name || '',
+    org_name: result.org_name || '',
+    voucher_no: result.voucher_no || '',
+    report_type: result.report_type || '',
+  };
+}
+
+function cacheUserKey(): string {
+  return getSession()?.user?.id || 'demo';
+}
+
+function isDraftFilled(draft: OcrDraft): boolean {
+  return Boolean(
+    draft.visit_no.trim() ||
+      draft.diagnosis.trim() ||
+      draft.medicine.trim() ||
+      draft.visit_date.trim() ||
+      draft.raw_ocr_text.trim(),
+  );
+}
 
 function isDemoToken(token: string | null): boolean {
   return !token || token.startsWith('demo-');
@@ -35,6 +98,341 @@ function formatDate(value: string | null | undefined): string {
     return '—';
   }
   return value.slice(0, 10);
+}
+
+type TimelineKind = 'report' | 'visit';
+
+type SelectedItem = {
+  kind: TimelineKind;
+  id: string;
+};
+
+type TimelineItem = {
+  key: string;
+  kind: TimelineKind;
+  id: string;
+  date: string;
+  badge: string;
+  title: string;
+  subtitle: string;
+  voucherLabel: string;
+  voucherNo: string;
+};
+
+function toTimelineItem(
+  kind: TimelineKind,
+  id: string,
+  date: string,
+  badge: string,
+  title: string,
+  subtitle: string,
+  voucherLabel: string,
+  voucherNo: string,
+): TimelineItem {
+  return {
+    key: `${kind}:${id}`,
+    kind,
+    id,
+    date,
+    badge,
+    title,
+    subtitle,
+    voucherLabel,
+    voucherNo,
+  };
+}
+
+function reportToTimelineItem(report: HealthReportListItem): TimelineItem {
+  return toTimelineItem(
+    'report',
+    report.id,
+    report.exam_date,
+    report.report_type || text('zh', 'healthArchiveReport'),
+    report.patient_name,
+    report.org_name,
+    text('zh', 'examVoucherLabel'),
+    report.voucher_no,
+  );
+}
+
+function visitToTimelineItem(visit: ArchiveRecord): TimelineItem {
+  return toTimelineItem(
+    'visit',
+    visit.id,
+    visit.visit_date,
+    text('zh', 'visitTypeBadge'),
+    visit.diagnosis,
+    visit.medicine,
+    text('zh', 'visitNoLabel'),
+    visit.visit_no,
+  );
+}
+
+function mergeTimeline(
+  reports: HealthReportListItem[],
+  visits: ArchiveRecord[],
+): TimelineItem[] {
+  const items = [
+    ...reports.map(reportToTimelineItem),
+    ...visits.map(visitToTimelineItem),
+  ];
+  items.sort((a, b) => {
+    const byDate = formatDate(b.date).localeCompare(formatDate(a.date));
+    if (byDate !== 0) {
+      return byDate;
+    }
+    return a.key.localeCompare(b.key);
+  });
+  return items;
+}
+
+function upsertVisit(list: ArchiveRecord[], record: ArchiveRecord): ArchiveRecord[] {
+  const byVisitNo = list.findIndex(item => item.visit_no === record.visit_no);
+  if (byVisitNo >= 0) {
+    const next = [...list];
+    next[byVisitNo] = {...next[byVisitNo], ...record, id: next[byVisitNo].id};
+    return next;
+  }
+  const byId = list.findIndex(item => item.id === record.id);
+  if (byId >= 0) {
+    const next = [...list];
+    next[byId] = record;
+    return next;
+  }
+  return [record, ...list];
+}
+
+function upsertReport(
+  list: HealthReportListItem[],
+  record: HealthReportListItem,
+): HealthReportListItem[] {
+  const byVoucher = list.findIndex(item => item.voucher_no === record.voucher_no);
+  if (byVoucher >= 0) {
+    const next = [...list];
+    next[byVoucher] = {...next[byVoucher], ...record, id: next[byVoucher].id};
+    return next;
+  }
+  const byId = list.findIndex(item => item.id === record.id);
+  if (byId >= 0) {
+    const next = [...list];
+    next[byId] = record;
+    return next;
+  }
+  return [record, ...list];
+}
+
+function recordFromOcr(result: OcrResult): ArchiveRecord | null {
+  if (!result.id) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  return {
+    id: result.id,
+    diagnosis: result.diagnosis || '',
+    medicine: result.medicine || '',
+    visit_date: (result.visit_date || '').slice(0, 10),
+    visit_no: result.visit_no || '',
+    raw_ocr_text: result.raw_ocr_text,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function reportFromOcr(result: OcrResult): HealthReportListItem | null {
+  if (!result.id) {
+    return null;
+  }
+  return {
+    id: result.id,
+    patient_name: result.patient_name || '',
+    exam_date: (result.visit_date || '').slice(0, 10),
+    org_name: result.org_name || '',
+    voucher_no: result.voucher_no || result.visit_no || '',
+    report_type: result.report_type || text('zh', 'healthArchiveReport'),
+  };
+}
+
+function isDuplicateArchiveError(err: unknown): boolean {
+  return (
+    err instanceof ApiError &&
+    (err.status === 409 ||
+      err.code === 'visit_no_conflict' ||
+      err.code === 'voucher_no_conflict')
+  );
+}
+
+function isOcrBannerError(message: string): boolean {
+  return [
+    'ocrSoon',
+    'ocrAlreadyInArchive',
+    'ocrFailed',
+    'ocrPickFailed',
+    'ocrCameraDenied',
+    'ocrImageTooLarge',
+  ].some(key => message === text('zh', key));
+}
+
+function messageForOcrError(err: unknown): string {
+  if (isDuplicateArchiveError(err)) {
+    return text('zh', 'ocrAlreadyInArchive');
+  }
+  if (err instanceof ApiError) {
+    if (err.code === 'image_too_large') {
+      return text('zh', 'ocrImageTooLarge');
+    }
+    return err.message || text('zh', 'ocrFailed');
+  }
+  if (err instanceof Error) {
+    if (err.name === 'NotAllowedError') {
+      return text('zh', 'ocrCameraDenied');
+    }
+    if (err.name === 'ImageTooLarge') {
+      return text('zh', 'ocrImageTooLarge');
+    }
+    return err.message || text('zh', 'ocrPickFailed');
+  }
+  return text('zh', 'ocrFailed');
+}
+
+function recordFromDraft(id: string, draft: OcrDraft): ArchiveRecord {
+  const now = new Date().toISOString();
+  return {
+    id,
+    diagnosis: draft.diagnosis.trim(),
+    medicine: draft.medicine.trim(),
+    visit_date: draft.visit_date.trim().slice(0, 10),
+    visit_no: draft.visit_no.trim(),
+    raw_ocr_text: draft.raw_ocr_text,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+type LatestEvent =
+  | {kind: 'report'; item: HealthReportListItem}
+  | {kind: 'visit'; item: ArchiveRecord};
+
+function pickLatestEvent(
+  reports: HealthReportListItem[],
+  visits: ArchiveRecord[],
+): LatestEvent | null {
+  const latestReport = reports.reduce<HealthReportListItem | null>((best, item) => {
+    if (!best || formatDate(item.exam_date) > formatDate(best.exam_date)) {
+      return item;
+    }
+    return best;
+  }, null);
+  const latestVisit = visits.reduce<ArchiveRecord | null>((best, item) => {
+    if (!best || formatDate(item.visit_date) > formatDate(best.visit_date)) {
+      return item;
+    }
+    return best;
+  }, null);
+
+  if (!latestReport && !latestVisit) {
+    return null;
+  }
+  if (!latestReport && latestVisit) {
+    return {kind: 'visit', item: latestVisit};
+  }
+  if (latestReport && !latestVisit) {
+    return {kind: 'report', item: latestReport};
+  }
+  return formatDate(latestVisit!.visit_date) >= formatDate(latestReport!.exam_date)
+    ? {kind: 'visit', item: latestVisit!}
+    : {kind: 'report', item: latestReport!};
+}
+
+type HomeSummaryCard = {
+  id: string;
+  title: string;
+  dateLabel: string;
+  date: string | null;
+  noLabel: string;
+  no: string | null;
+  body: string;
+  items: Array<{id: string; content: string}>;
+};
+
+function visitToHomeCard(visit: ArchiveRecord): HomeSummaryCard {
+  return {
+    id: `recent-visit:${visit.id}`,
+    title: text('zh', 'recentVisitTitle'),
+    dateLabel: text('zh', 'visitDateLabel'),
+    date: visit.visit_date,
+    noLabel: text('zh', 'visitNoLabel'),
+    no: visit.visit_no,
+    body: visit.diagnosis,
+    items: visit.medicine
+      ? [{id: `${visit.id}-med`, content: `${text('zh', 'medicineLabel')}：${visit.medicine}`}]
+      : [],
+  };
+}
+
+function reportToHomeCard(report: HealthReportListItem): HomeSummaryCard {
+  return {
+    id: `recent-report:${report.id}`,
+    title: text('zh', 'recentCheckupTitle'),
+    dateLabel: text('zh', 'examDateLabel'),
+    date: report.exam_date,
+    noLabel: text('zh', 'examNoLabel'),
+    no: report.voucher_no,
+    body: `${report.org_name} · ${report.report_type}`,
+    items: [],
+  };
+}
+
+function summaryToHomeCard(summary: HealthSummary, asCheckup: boolean): HomeSummaryCard {
+  return {
+    id: summary.id,
+    title: summary.title || (asCheckup ? text('zh', 'recentCheckupTitle') : text('zh', 'healthProblemTitle')),
+    dateLabel: text('zh', 'examDateLabel'),
+    date: summary.exam_date,
+    noLabel: text('zh', 'examNoLabel'),
+    no: summary.exam_no,
+    body: summary.summary_text,
+    items: (summary.items || []).map(item => ({id: item.id, content: item.content})),
+  };
+}
+
+function matchCheckupSummary(
+  summaries: HealthSummary[],
+  report: HealthReportListItem,
+): HealthSummary | null {
+  const sameExam = summaries.filter(item => {
+    const sameNo = Boolean(item.exam_no && item.exam_no === report.voucher_no);
+    const sameDate =
+      Boolean(item.exam_date) && formatDate(item.exam_date) === formatDate(report.exam_date);
+    return sameNo || sameDate;
+  });
+  if (!sameExam.length) {
+    return null;
+  }
+  const named = sameExam.find(item => item.title.includes('体检') && !(item.items?.length));
+  if (named) {
+    return named;
+  }
+  const plain = sameExam.find(item => !(item.items?.length));
+  return plain || sameExam[0];
+}
+
+function buildRecentHomeCard(
+  reports: HealthReportListItem[],
+  visits: ArchiveRecord[],
+  summaries: HealthSummary[],
+): {card: HomeSummaryCard | null; usedSummaryId: string | null} {
+  const latest = pickLatestEvent(reports, visits);
+  if (!latest) {
+    return {card: null, usedSummaryId: null};
+  }
+  if (latest.kind === 'visit') {
+    return {card: visitToHomeCard(latest.item), usedSummaryId: null};
+  }
+  const matched = matchCheckupSummary(summaries, latest.item);
+  if (matched) {
+    return {card: summaryToHomeCard(matched, true), usedSummaryId: matched.id};
+  }
+  return {card: reportToHomeCard(latest.item), usedSummaryId: null};
 }
 
 /** 演示进入：保留原来的样例界面，不请求后端 */
@@ -180,18 +578,37 @@ const DEMO_REPORT_DETAILS: Record<string, HealthReportDetail> = {
 };
 
 const DEMO_OCR_RESULT: OcrResult = {
+  document_type: 'visit',
+  id: 'a1',
   diagnosis: '支气管炎倾向，建议复查',
   medicine: '按医嘱服用止咳药，注意饮水',
   visit_date: '2026-07-27',
-  raw_ocr_text: '演示 OCR 全文：门诊病历……',
+  visit_no: 'MZ202607270018',
+  raw_ocr_text: '演示 OCR 全文：门诊病历……就诊号 MZ202607270018……',
+  findings: [],
 };
+
+const DEMO_ARCHIVES: ArchiveRecord[] = [
+  {
+    id: 'a1',
+    diagnosis: '支气管炎倾向，建议复查',
+    medicine: '按医嘱服用止咳药，注意饮水',
+    visit_date: '2026-07-27',
+    visit_no: 'MZ202607270018',
+    raw_ocr_text: '门诊病历：主诉咳嗽胸闷……就诊号 MZ202607270018。诊断：支气管炎倾向。',
+    created_at: '2026-07-27T00:00:00Z',
+    updated_at: '2026-07-27T00:00:00Z',
+  },
+];
 
 export default function ArchiveScreen() {
   const [mode, setMode] = useState<ViewMode>('home');
   const [summaries, setSummaries] = useState<HealthSummary[]>([]);
   const [reports, setReports] = useState<HealthReportListItem[]>([]);
-  const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
+  const [visits, setVisits] = useState<ArchiveRecord[]>([]);
+  const [selectedItem, setSelectedItem] = useState<SelectedItem | null>(null);
   const [reportDetail, setReportDetail] = useState<HealthReportDetail | null>(null);
+  const [visitDetail, setVisitDetail] = useState<ArchiveRecord | null>(null);
   const [detailTab, setDetailTab] = useState<'abnormal' | 'full'>('abnormal');
 
   const [homeLoading, setHomeLoading] = useState(true);
@@ -200,17 +617,69 @@ export default function ArchiveScreen() {
   const [error, setError] = useState('');
   const [demoMode, setDemoMode] = useState(false);
 
-  const [recognized, setRecognized] = useState(false);
-  const [ocrResult, setOcrResult] = useState<OcrResult | null>(null);
+  const [recognizing, setRecognizing] = useState(false);
+  const [ocrDraft, setOcrDraft] = useState<OcrDraft>(emptyDraft());
+  const [recognizeSource, setRecognizeSource] = useState<'camera' | 'album' | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [savedArchiveId, setSavedArchiveId] = useState<string | null>(null);
+  const [hasCachedOcr, setHasCachedOcr] = useState(false);
+  const [openedFromCache, setOpenedFromCache] = useState(false);
+  const recognizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const refreshCachedFlag = useCallback(() => {
+    setHasCachedOcr(Boolean(loadLastOcrCache(cacheUserKey())));
+  }, []);
+
+  const persistOcrDraft = useCallback(
+    (
+      draft: OcrDraft,
+      source: 'camera' | 'album' | null,
+      extras?: {
+        saved?: boolean;
+        savedArchiveId?: string | null;
+        /** 仅新识别成功时传入，用于覆盖缓存 */
+        recognizedAt?: string;
+      },
+    ) => {
+      if (!isDraftFilled(draft)) {
+        refreshCachedFlag();
+        return;
+      }
+      saveLastOcrCache({
+        userKey: cacheUserKey(),
+        draft,
+        source,
+        saved: extras?.saved,
+        savedArchiveId: extras?.savedArchiveId,
+        recognizedAt: extras?.recognizedAt,
+      });
+      setHasCachedOcr(true);
+    },
+    [refreshCachedFlag],
+  );
+
+  useEffect(() => {
+    refreshCachedFlag();
+    return () => {
+      if (recognizeTimerRef.current) {
+        clearTimeout(recognizeTimerRef.current);
+      }
+    };
+  }, [refreshCachedFlag]);
+
+  // 切换账号后按当前用户标识重新加载对应缓存
+  useEffect(() => {
+    refreshCachedFlag();
+  }, [refreshCachedFlag, mode]);
 
   const loadHome = useCallback(async () => {
     const token = getAccessToken();
     if (isDemoToken(token)) {
       setDemoMode(true);
       setSummaries(DEMO_SUMMARIES);
+      setReports(DEMO_REPORTS);
+      setVisits(prev => (prev.length ? prev : DEMO_ARCHIVES));
       setHomeLoading(false);
       setError('');
       return;
@@ -220,10 +689,34 @@ export default function ArchiveScreen() {
     setHomeLoading(true);
     setError('');
     try {
-      const res = await listHealthSummaries(token!);
-      setSummaries(res.items || []);
+      const [summaryResult, reportResult, archiveResult] = await Promise.allSettled([
+        listHealthSummaries(token!),
+        listHealthReports(token!, {page: 1, page_size: 100}),
+        listArchives(token!, {page: 1, page_size: 100}),
+      ]);
+      const summaryItems =
+        summaryResult.status === 'fulfilled' ? summaryResult.value.items || [] : [];
+      const reportItems =
+        reportResult.status === 'fulfilled' ? reportResult.value.items || [] : [];
+      const visitItems =
+        archiveResult.status === 'fulfilled' ? archiveResult.value.items || [] : [];
+      setSummaries(summaryItems);
+      setReports(reportItems);
+      if (archiveResult.status === 'fulfilled') {
+        setVisits(visitItems);
+      }
+      if (
+        summaryResult.status === 'rejected' &&
+        reportResult.status === 'rejected' &&
+        archiveResult.status === 'rejected'
+      ) {
+        const err = summaryResult.reason;
+        setError(err instanceof ApiError ? err.message : text('zh', 'archiveLoadFailed'));
+      }
     } catch (err) {
       setSummaries([]);
+      setReports([]);
+      setVisits([]);
       setError(err instanceof ApiError ? err.message : text('zh', 'archiveLoadFailed'));
     } finally {
       setHomeLoading(false);
@@ -235,6 +728,7 @@ export default function ArchiveScreen() {
     if (isDemoToken(token)) {
       setDemoMode(true);
       setReports(DEMO_REPORTS);
+      setVisits(prev => (prev.length ? prev : DEMO_ARCHIVES));
       setReportsLoading(false);
       setError('');
       return;
@@ -244,23 +738,51 @@ export default function ArchiveScreen() {
     setReportsLoading(true);
     setError('');
     try {
-      const res = await listHealthReports(token!, {page: 1, page_size: 50});
-      setReports(res.items || []);
+      const [reportResult, archiveResult] = await Promise.allSettled([
+        listHealthReports(token!, {page: 1, page_size: 100}),
+        listArchives(token!, {page: 1, page_size: 100}),
+      ]);
+      const reportItems =
+        reportResult.status === 'fulfilled' ? reportResult.value.items || [] : [];
+      const visitItems =
+        archiveResult.status === 'fulfilled' ? archiveResult.value.items || [] : [];
+      setReports(reportItems);
+      if (archiveResult.status === 'fulfilled') {
+        setVisits(visitItems);
+      }
+      if (reportResult.status === 'rejected' && archiveResult.status === 'rejected') {
+        const err = reportResult.reason;
+        setError(err instanceof ApiError ? err.message : text('zh', 'archiveLoadFailed'));
+      }
     } catch (err) {
       setReports([]);
+      setVisits([]);
       setError(err instanceof ApiError ? err.message : text('zh', 'archiveLoadFailed'));
     } finally {
       setReportsLoading(false);
     }
   }, []);
 
-  const loadReportDetail = useCallback(async (id: string) => {
+  const loadTimelineDetail = useCallback(async (item: SelectedItem) => {
     const token = getAccessToken();
     if (isDemoToken(token)) {
       setDemoMode(true);
-      setReportDetail(DEMO_REPORT_DETAILS[id] || null);
+      if (item.kind === 'report') {
+        const detail = DEMO_REPORT_DETAILS[item.id] || null;
+        setReportDetail(detail);
+        setVisitDetail(null);
+        setDetailLoading(false);
+        setError(detail ? '' : text('zh', 'archiveEmptyDetail'));
+        return;
+      }
+      const visit =
+        visits.find(row => row.id === item.id) ||
+        DEMO_ARCHIVES.find(row => row.id === item.id) ||
+        null;
+      setVisitDetail(visit);
+      setReportDetail(null);
       setDetailLoading(false);
-      setError(DEMO_REPORT_DETAILS[id] ? '' : text('zh', 'archiveEmptyDetail'));
+      setError(visit ? '' : text('zh', 'archiveEmptyDetail'));
       return;
     }
 
@@ -268,15 +790,23 @@ export default function ArchiveScreen() {
     setDetailLoading(true);
     setError('');
     try {
-      const detail = await getHealthReport(token!, id);
-      setReportDetail(detail);
+      if (item.kind === 'report') {
+        const detail = await getHealthReport(token!, item.id);
+        setReportDetail(detail);
+        setVisitDetail(null);
+      } else {
+        const detail = await getArchive(token!, item.id);
+        setVisitDetail(detail);
+        setReportDetail(null);
+      }
     } catch (err) {
       setReportDetail(null);
+      setVisitDetail(null);
       setError(err instanceof ApiError ? err.message : text('zh', 'archiveLoadFailed'));
     } finally {
       setDetailLoading(false);
     }
-  }, []);
+  }, [visits]);
 
   useEffect(() => {
     loadHome();
@@ -289,62 +819,237 @@ export default function ArchiveScreen() {
   }, [mode, loadReports]);
 
   useEffect(() => {
-    if (mode === 'detail' && selectedReportId) {
-      loadReportDetail(selectedReportId);
+    if (mode === 'detail' && selectedItem) {
+      loadTimelineDetail(selectedItem);
     }
-  }, [mode, selectedReportId, loadReportDetail]);
+  }, [mode, selectedItem, loadTimelineDetail]);
 
-  /** 演示模式展示样例 OCR；真实登录后待接图片选择器 */
-  function startRecognize(_source: 'camera' | 'album') {
-    const token = getAccessToken();
-    if (isDemoToken(token)) {
-      setError('');
-      setOcrResult(DEMO_OCR_RESULT);
-      setRecognized(true);
-      setSaved(false);
-      setSavedArchiveId(null);
-      return;
+  function leaveConfirmToHome() {
+    if (recognizeTimerRef.current) {
+      clearTimeout(recognizeTimerRef.current);
+      recognizeTimerRef.current = null;
     }
-    setError(text('zh', 'ocrSoon'));
-    setRecognized(false);
-    setOcrResult(null);
+    // 返回不清除缓存：未保存/未推送也保留，直到下次新识别覆盖
+    setRecognizing(false);
+    setSaving(false);
+    setError('');
+    setOpenedFromCache(false);
+    setOcrDraft(emptyDraft());
+    setRecognizeSource(null);
     setSaved(false);
     setSavedArchiveId(null);
+    refreshCachedFlag();
+    setMode('home');
+  }
+
+  function openLastOcrCache() {
+    const cached = loadLastOcrCache(cacheUserKey());
+    if (!cached) {
+      setHasCachedOcr(false);
+      return;
+    }
+    setError('');
+    setOcrDraft({
+      ...emptyDraft(),
+      ...cached.draft,
+      document_type: cached.draft.document_type === 'exam' ? 'exam' : 'visit',
+      patient_name: cached.draft.patient_name || '',
+      org_name: cached.draft.org_name || '',
+      voucher_no: cached.draft.voucher_no || '',
+      report_type: cached.draft.report_type || '',
+    });
+    setRecognizeSource(cached.source);
+    setSaved(cached.saved);
+    setSavedArchiveId(cached.savedArchiveId);
+    setRecognizing(false);
+    setOpenedFromCache(true);
+    setMode('confirm');
+  }
+
+  function updateDraft(patch: Partial<OcrDraft>) {
+    setOcrDraft(prev => {
+      const next = {...prev, ...patch};
+      persistOcrDraft(next, recognizeSource, {
+        saved,
+        savedArchiveId,
+      });
+      return next;
+    });
+    setOpenedFromCache(false);
+  }
+
+  /** 演示：模拟识别。正式登录：选图后只调 POST /archives/ocr，后端已入库。 */
+  function startDemoRecognize(source: 'camera' | 'album') {
+    if (recognizeTimerRef.current) {
+      clearTimeout(recognizeTimerRef.current);
+    }
+
+    setError('');
+    setSaved(false);
+    setSavedArchiveId(null);
+    setRecognizeSource(source);
+    setRecognizing(true);
+    setOpenedFromCache(false);
+    setMode('confirm');
+    setOcrDraft(emptyDraft());
+
+    recognizeTimerRef.current = setTimeout(() => {
+      const nextDraft = draftFromOcr(DEMO_OCR_RESULT);
+      setOcrDraft(nextDraft);
+      setRecognizing(false);
+      persistOcrDraft(nextDraft, source, {
+        saved: false,
+        savedArchiveId: null,
+        recognizedAt: new Date().toISOString(),
+      });
+      recognizeTimerRef.current = null;
+    }, 700);
+  }
+
+  async function startRecognize(source: 'camera' | 'album') {
+    const token = getAccessToken();
+    if (isDemoToken(token)) {
+      startDemoRecognize(source);
+      return;
+    }
+
+    setError('');
+    let picked;
+    try {
+      picked = await pickImage(source);
+    } catch (err) {
+      if (isImagePickCancelled(err)) {
+        return;
+      }
+      setError(messageForOcrError(err));
+      return;
+    }
+
+    if (recognizeTimerRef.current) {
+      clearTimeout(recognizeTimerRef.current);
+      recognizeTimerRef.current = null;
+    }
+
+    setSaved(false);
+    setSavedArchiveId(null);
+    setRecognizeSource(source);
+    setRecognizing(true);
+    setOpenedFromCache(false);
+    setOcrDraft(emptyDraft());
+    setMode('confirm');
+
+    try {
+      const result = await ocrArchiveImage(token!, {
+        file: picked.file,
+        source,
+        fileName: picked.name,
+      });
+      const nextDraft = draftFromOcr(result);
+      const savedId = result.id || null;
+      setOcrDraft(nextDraft);
+      setRecognizing(false);
+      setSaved(true);
+      setSavedArchiveId(savedId);
+      persistOcrDraft(nextDraft, source, {
+        saved: true,
+        savedArchiveId: savedId,
+        recognizedAt: new Date().toISOString(),
+      });
+      if (result.document_type === 'exam') {
+        const report = reportFromOcr(result);
+        if (report) {
+          setReports(prev => upsertReport(prev, report));
+        }
+      } else {
+        const visit = recordFromOcr(result);
+        if (visit) {
+          setVisits(prev => upsertVisit(prev, visit));
+        }
+      }
+      loadHome().catch(() => undefined);
+    } catch (err) {
+      setRecognizing(false);
+      setMode('home');
+      setError(messageForOcrError(err));
+      if (isDuplicateArchiveError(err)) {
+        loadHome().catch(() => undefined);
+      }
+    }
+  }
+
+  function openOcrDetail() {
+    if (!savedArchiveId) {
+      return;
+    }
+    setSelectedItem({
+      kind: ocrDraft.document_type === 'exam' ? 'report' : 'visit',
+      id: savedArchiveId,
+    });
+    setDetailTab('abnormal');
+    setReportDetail(null);
+    setVisitDetail(null);
+    setMode('detail');
   }
 
   async function handleSaveArchive() {
-    if (!ocrResult || saving) {
+    if (saving || recognizing || saved) {
       return;
     }
+    const diagnosis = ocrDraft.diagnosis.trim();
+    const medicine = ocrDraft.medicine.trim();
+    const visitDate = ocrDraft.visit_date.trim();
+    const visitNo = ocrDraft.visit_no.trim();
+    if (!visitNo) {
+      setError(text('zh', 'visitNoRequired'));
+      return;
+    }
+    if (!diagnosis || !medicine || !visitDate) {
+      setError(text('zh', 'archiveSaveFailed'));
+      return;
+    }
+
     const token = getAccessToken();
     if (isDemoToken(token)) {
+      const record = recordFromDraft(`demo-${visitNo}`, ocrDraft);
+      setVisits(prev => upsertVisit(prev.length ? prev : DEMO_ARCHIVES, record));
       setSaved(true);
-      setSavedArchiveId('demo-archive');
+      setSavedArchiveId(record.id);
       setError('');
+      persistOcrDraft(ocrDraft, recognizeSource, {
+        saved: true,
+        savedArchiveId: record.id,
+      });
       return;
     }
 
-    setSaving(true);
+    // 正式登录：OCR 接口已入库，确认页不再 POST /archives
+    setSaved(true);
     setError('');
-    try {
-      const record = await createArchive(token!, {
-        diagnosis: ocrResult.diagnosis,
-        medicine: ocrResult.medicine,
-        visit_date: ocrResult.visit_date,
-        raw_ocr_text: ocrResult.raw_ocr_text,
-      });
-      setSaved(true);
-      setSavedArchiveId(record.id);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : text('zh', 'archiveSaveFailed'));
-    } finally {
-      setSaving(false);
-    }
+    persistOcrDraft(ocrDraft, recognizeSource, {
+      saved: true,
+      savedArchiveId,
+    });
   }
 
+  const {card: recentFromTimeline, usedSummaryId} = buildRecentHomeCard(
+    reports,
+    visits,
+    summaries,
+  );
+  const recentCard =
+    recentFromTimeline ||
+    (summaries[0]
+      ? summaryToHomeCard(
+          summaries.find(item => (item.items?.length || 0) > 0) || summaries[0],
+          false,
+        )
+      : null);
+  const recentId = recentFromTimeline ? usedSummaryId : recentCard?.id || null;
   const problemSummary =
-    summaries.find(item => (item.items?.length || 0) > 0) || summaries[0] || null;
-  const otherSummaries = summaries.filter(item => item.id !== problemSummary?.id);
+    summaries.find(item => item.id !== recentId && (item.items?.length || 0) > 0) || null;
+  const otherSummaries = summaries.filter(
+    item => item.id !== recentId && item.id !== problemSummary?.id,
+  );
 
   const glossaryFallback: ReportGlossaryItem[] = [
     {id: 'g1', term: '随诊', definition: text('zh', 'glossaryFollow'), sort_order: 0},
@@ -352,12 +1057,207 @@ export default function ArchiveScreen() {
     {id: 'g3', term: '复查', definition: text('zh', 'glossaryRecheck'), sort_order: 2},
   ];
 
+  if (mode === 'confirm') {
+    const isDemo = isDemoToken(getAccessToken());
+    const sourceLabel =
+      recognizeSource === 'camera'
+        ? text('zh', 'cameraImport')
+        : recognizeSource === 'album'
+          ? text('zh', 'albumImport')
+          : text('zh', 'ocrResultTitle');
+
+    return (
+      <ScrollView
+        style={styles.page}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}>
+        <BackButton label={text('zh', 'backToArchive')} onPress={leaveConfirmToHome} />
+        <Text style={styles.title}>{text('zh', 'ocrConfirmTitle')}</Text>
+        <Text style={styles.subtitle}>
+          {isDemo ? text('zh', 'ocrConfirmSubtitle') : text('zh', 'ocrConfirmLiveSubtitle')}
+        </Text>
+        <Text style={styles.confirmSource}>
+          {sourceLabel}
+          {openedFromCache ? ` · ${text('zh', 'ocrCachedBadge')}` : ''}
+        </Text>
+
+        {recognizing ? (
+          <LoadingBlock label={text('zh', 'ocrRecognizing')} />
+        ) : saved ? (
+          <View style={styles.resultCard}>
+            <Text style={styles.cardTitle}>{text('zh', 'ocrResultTitle')}</Text>
+            {ocrDraft.document_type === 'exam' ? (
+              <>
+                <InfoRow label={text('zh', 'patientNameLabel')} value={ocrDraft.patient_name} />
+                <InfoRow label={text('zh', 'orgNameLabel')} value={ocrDraft.org_name} />
+                <InfoRow
+                  label={text('zh', 'examVoucherLabel')}
+                  value={ocrDraft.voucher_no || ocrDraft.visit_no}
+                />
+                <InfoRow label={text('zh', 'examDateLabel')} value={formatDate(ocrDraft.visit_date)} />
+                {ocrDraft.diagnosis ? (
+                  <InfoRow label={text('zh', 'diagnosisLabel')} value={ocrDraft.diagnosis} />
+                ) : null}
+                {ocrDraft.medicine ? (
+                  <InfoRow label={text('zh', 'medicineLabel')} value={ocrDraft.medicine} />
+                ) : null}
+              </>
+            ) : (
+              <>
+                <InfoRow label={text('zh', 'visitNoLabel')} value={ocrDraft.visit_no} />
+                <InfoRow label={text('zh', 'diagnosisLabel')} value={ocrDraft.diagnosis} />
+                <InfoRow label={text('zh', 'medicineLabel')} value={ocrDraft.medicine} />
+                <InfoRow label={text('zh', 'dateLabel')} value={formatDate(ocrDraft.visit_date)} />
+              </>
+            )}
+            <Text style={styles.savedText}>
+              {isDemo ? text('zh', 'savedStatus') : text('zh', 'ocrSavedAuto')}
+            </Text>
+            {ocrDraft.document_type === 'visit' ? (
+              <View style={styles.actionRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={!savedArchiveId}
+                  onPress={() => {
+                    if (isDemo) {
+                      setError('');
+                      return;
+                    }
+                    setError(text('zh', 'shareSoon'));
+                  }}
+                  style={styles.secondaryButtonWide}>
+                  <Text style={styles.secondaryText}>{text('zh', 'pushChildren')}</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={!savedArchiveId}
+                  onPress={() => {
+                    if (isDemo) {
+                      setError('');
+                      return;
+                    }
+                    setError(text('zh', 'exportSoon'));
+                  }}
+                  style={styles.secondaryButtonWide}>
+                  <Text style={styles.secondaryText}>{text('zh', 'exportPdf')}</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            <Pressable
+              accessibilityRole="button"
+              disabled={!savedArchiveId}
+              onPress={openOcrDetail}
+              style={[styles.primaryButtonFull, !savedArchiveId && styles.disabledButton]}>
+              <Text style={styles.primaryText}>{text('zh', 'ocrViewDetail')}</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={leaveConfirmToHome}
+              style={styles.cancelButton}>
+              <Text style={styles.cancelText}>{text('zh', 'ocrDoneBack')}</Text>
+            </Pressable>
+            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+          </View>
+        ) : (
+          <View style={styles.confirmCard}>
+            <Text style={styles.cardTitle}>{text('zh', 'ocrResultTitle')}</Text>
+            <Text style={styles.fieldLabel}>{text('zh', 'visitNoLabel')}</Text>
+            <TextInput
+              accessibilityLabel={text('zh', 'visitNoLabel')}
+              value={ocrDraft.visit_no}
+              onChangeText={value => updateDraft({visit_no: value})}
+              placeholder={text('zh', 'visitNoPlaceholder')}
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="characters"
+              style={styles.fieldInput}
+            />
+            <Text style={styles.fieldLabel}>{text('zh', 'diagnosisLabel')}</Text>
+            <TextInput
+              accessibilityLabel={text('zh', 'diagnosisLabel')}
+              value={ocrDraft.diagnosis}
+              onChangeText={value => updateDraft({diagnosis: value})}
+              placeholder={text('zh', 'diagnosisPlaceholder')}
+              placeholderTextColor={colors.textMuted}
+              multiline
+              style={[styles.fieldInput, styles.fieldInputTall]}
+            />
+            <Text style={styles.fieldLabel}>{text('zh', 'medicineLabel')}</Text>
+            <TextInput
+              accessibilityLabel={text('zh', 'medicineLabel')}
+              value={ocrDraft.medicine}
+              onChangeText={value => updateDraft({medicine: value})}
+              placeholder={text('zh', 'medicinePlaceholder')}
+              placeholderTextColor={colors.textMuted}
+              multiline
+              style={[styles.fieldInput, styles.fieldInputTall]}
+            />
+            <Text style={styles.fieldLabel}>{text('zh', 'dateLabel')}</Text>
+            <TextInput
+              accessibilityLabel={text('zh', 'dateLabel')}
+              value={ocrDraft.visit_date}
+              onChangeText={value => updateDraft({visit_date: value})}
+              placeholder={text('zh', 'datePlaceholder')}
+              placeholderTextColor={colors.textMuted}
+              style={styles.fieldInput}
+            />
+            {ocrDraft.raw_ocr_text ? (
+              <View style={styles.rawBox}>
+                <Text style={styles.fieldLabel}>{text('zh', 'ocrRawLabel')}</Text>
+                <Text style={styles.rawText}>{ocrDraft.raw_ocr_text}</Text>
+              </View>
+            ) : null}
+            <Pressable
+              accessibilityRole="button"
+              disabled={saving}
+              onPress={handleSaveArchive}
+              style={[styles.primaryButtonFull, saving && styles.disabledButton]}>
+              {saving ? (
+                <ActivityIndicator color={colors.surface} />
+              ) : (
+                <Text style={styles.primaryText}>{text('zh', 'saveRecord')}</Text>
+              )}
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              disabled={saving}
+              onPress={leaveConfirmToHome}
+              style={styles.cancelButton}>
+              <Text style={styles.cancelText}>{text('zh', 'ocrCancel')}</Text>
+            </Pressable>
+            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+          </View>
+        )}
+      </ScrollView>
+    );
+  }
+
   if (mode === 'detail') {
+    const isVisit = selectedItem?.kind === 'visit';
     const findings = reportDetail?.findings || [];
     const glossary =
       reportDetail?.glossary && reportDetail.glossary.length > 0
         ? reportDetail.glossary
         : glossaryFallback;
+    const visitFindings = visitDetail
+      ? [
+          {
+            id: 'visit-diagnosis',
+            title: `${text('zh', 'diagnosisLabel')}：${visitDetail.diagnosis}`,
+            suggestion: `${text('zh', 'medicineLabel')}：${visitDetail.medicine}`,
+          },
+        ]
+      : [];
+    const detailCards = isVisit ? visitFindings : findings;
+    const hasDetail = isVisit ? Boolean(visitDetail) : Boolean(reportDetail);
+    const detailName = isVisit ? visitDetail?.diagnosis : reportDetail?.patient_name;
+    const detailNoLabel = isVisit ? text('zh', 'visitNoLabel') : text('zh', 'examNoLabel');
+    const detailNo = isVisit ? visitDetail?.visit_no : reportDetail?.voucher_no;
+    const detailDate = isVisit ? visitDetail?.visit_date : reportDetail?.exam_date;
+    const fullText = isVisit
+      ? visitDetail?.raw_ocr_text?.trim()
+      : reportDetail?.full_text?.trim();
+    const primaryTabLabel = isVisit ? text('zh', 'visitInfoTab') : text('zh', 'abnormalTab');
 
     return (
       <ScrollView style={styles.page} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -365,21 +1265,22 @@ export default function ArchiveScreen() {
           label={text('zh', 'backToReports')}
           onPress={() => {
             setMode('reports');
-            setSelectedReportId(null);
+            setSelectedItem(null);
             setReportDetail(null);
+            setVisitDetail(null);
           }}
         />
 
         {detailLoading ? (
           <LoadingBlock label={text('zh', 'archiveLoading')} />
-        ) : reportDetail ? (
+        ) : hasDetail ? (
           <>
-            <Text style={styles.detailName}>{reportDetail.patient_name}</Text>
+            <Text style={styles.detailName}>{detailName}</Text>
             <Text style={styles.metaLine}>
-              {text('zh', 'examNoLabel')}：{reportDetail.voucher_no}
+              {detailNoLabel}：{detailNo}
             </Text>
             <Text style={styles.metaLine}>
-              {text('zh', 'examDateLabel')}：{formatDate(reportDetail.exam_date)}
+              {text('zh', 'examDateLabel')}：{formatDate(detailDate)}
             </Text>
 
             <View style={styles.detailTabs}>
@@ -388,10 +1289,10 @@ export default function ArchiveScreen() {
                 onPress={() => setDetailTab('abnormal')}
                 style={[styles.detailTab, detailTab === 'abnormal' && styles.detailTabActive]}>
                 <Text style={[styles.detailTabText, detailTab === 'abnormal' && styles.detailTabTextActive]}>
-                  {text('zh', 'abnormalTab')}
+                  {primaryTabLabel}
                 </Text>
                 <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{findings.length}项</Text>
+                  <Text style={styles.badgeText}>{detailCards.length}项</Text>
                 </View>
               </Pressable>
               <Pressable
@@ -405,8 +1306,8 @@ export default function ArchiveScreen() {
             </View>
 
             {detailTab === 'abnormal' ? (
-              findings.length ? (
-                findings.map(item => (
+              detailCards.length ? (
+                detailCards.map(item => (
                   <View key={item.id} style={styles.abnormalCard}>
                     <Text style={styles.abnormalTitle}>{item.title}</Text>
                     <View style={styles.suggestionBox}>
@@ -419,33 +1320,34 @@ export default function ArchiveScreen() {
               )
             ) : (
               <View style={styles.fullCard}>
-                <Text style={styles.fullText}>
-                  {reportDetail.full_text?.trim() || text('zh', 'fullReportBody')}
-                </Text>
+                <Text style={styles.fullText}>{fullText || text('zh', 'fullReportBody')}</Text>
               </View>
             )}
 
-            <View style={styles.glossaryCard}>
-              <Text style={styles.glossaryTitle}>{text('zh', 'glossaryTitle')}</Text>
-              {glossary.map(item => (
-                <Text key={item.id} style={styles.glossaryItem}>
-                  {item.definition.startsWith(item.term)
-                    ? item.definition
-                    : `${item.term}：${item.definition}`}
-                </Text>
-              ))}
-            </View>
+            {isVisit ? null : (
+              <View style={styles.glossaryCard}>
+                <Text style={styles.glossaryTitle}>{text('zh', 'glossaryTitle')}</Text>
+                {glossary.map(item => (
+                  <Text key={item.id} style={styles.glossaryItem}>
+                    {item.definition.startsWith(item.term)
+                      ? item.definition
+                      : `${item.term}：${item.definition}`}
+                  </Text>
+                ))}
+              </View>
+            )}
           </>
         ) : (
           <EmptyBlock label={error || text('zh', 'archiveEmptyDetail')} />
         )}
 
-        {error && reportDetail ? <Text style={styles.errorText}>{error}</Text> : null}
+        {error && hasDetail ? <Text style={styles.errorText}>{error}</Text> : null}
       </ScrollView>
     );
   }
 
   if (mode === 'reports') {
+    const timeline = mergeTimeline(reports, visits);
     return (
       <ScrollView style={styles.page} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <BackButton label={text('zh', 'backToArchive')} onPress={() => setMode('home')} />
@@ -454,16 +1356,16 @@ export default function ArchiveScreen() {
 
         {reportsLoading ? (
           <LoadingBlock label={text('zh', 'archiveLoading')} />
-        ) : error && !reports.length ? (
+        ) : error && !timeline.length ? (
           <EmptyBlock label={error} onRetry={loadReports} />
-        ) : !reports.length ? (
+        ) : !timeline.length ? (
           <EmptyBlock label={text('zh', 'archiveEmptyReports')} onRetry={loadReports} />
         ) : (
           <View style={styles.reportList}>
-            {reports.map((report, index) => {
-              const isLast = index === reports.length - 1;
+            {timeline.map((item, index) => {
+              const isLast = index === timeline.length - 1;
               return (
-                <View key={report.id} style={styles.reportItem}>
+                <View key={item.key} style={styles.reportItem}>
                   <View style={styles.reportRail}>
                     <View style={styles.reportDot} />
                     {!isLast && (
@@ -476,27 +1378,28 @@ export default function ArchiveScreen() {
                   </View>
 
                   <View style={styles.reportContent}>
-                    <Text style={styles.reportDate}>{formatDate(report.exam_date)}</Text>
+                    <Text style={styles.reportDate}>{formatDate(item.date)}</Text>
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={`${report.exam_date} ${report.report_type}`}
+                      accessibilityLabel={`${item.date} ${item.badge}`}
                       onPress={() => {
-                        setSelectedReportId(report.id);
+                        setSelectedItem({kind: item.kind, id: item.id});
                         setDetailTab('abnormal');
                         setReportDetail(null);
+                        setVisitDetail(null);
                         setMode('detail');
                       }}
                       style={styles.reportCard}>
                       <View style={styles.reportBadge}>
-                        <Text style={styles.reportBadgeText}>{report.report_type}</Text>
+                        <Text style={styles.reportBadgeText}>{item.badge}</Text>
                       </View>
-                      <Text style={styles.reportName}>{report.patient_name}</Text>
+                      <Text style={styles.reportName}>{item.title}</Text>
                       <View style={styles.reportOrgRow}>
                         <View style={styles.orgIcon} />
-                        <Text style={styles.reportOrg}>{report.org_name}</Text>
+                        <Text style={styles.reportOrg}>{item.subtitle}</Text>
                       </View>
                       <Text style={styles.reportVoucher}>
-                        {text('zh', 'examVoucherLabel')}：{report.voucher_no}
+                        {item.voucherLabel}：{item.voucherNo}
                       </Text>
                     </Pressable>
                   </View>
@@ -541,108 +1444,52 @@ export default function ArchiveScreen() {
             <Text style={styles.secondaryText}>{text('zh', 'albumImport')}</Text>
           </Pressable>
         </View>
-      </View>
-
-      {recognized && ocrResult ? (
-        <View style={styles.resultCard}>
-          <Text style={styles.cardTitle}>{text('zh', 'ocrResultTitle')}</Text>
-          <InfoRow label={text('zh', 'diagnosisLabel')} value={ocrResult.diagnosis} />
-          <InfoRow label={text('zh', 'medicineLabel')} value={ocrResult.medicine} />
-          <InfoRow label={text('zh', 'dateLabel')} value={formatDate(ocrResult.visit_date)} />
-          <Pressable
-            accessibilityRole="button"
-            disabled={saving || saved}
-            onPress={handleSaveArchive}
-            style={[styles.primaryButtonFull, (saving || saved) && styles.disabledButton]}>
-            {saving ? (
-              <ActivityIndicator color={colors.surface} />
-            ) : (
-              <Text style={styles.primaryText}>{text('zh', 'saveRecord')}</Text>
-            )}
-          </Pressable>
-          <View style={styles.actionRow}>
+        {hasCachedOcr ? (
+          <View style={styles.cacheBox}>
+            <Text style={styles.cacheHint}>{text('zh', 'ocrLastResultHint')}</Text>
             <Pressable
               accessibilityRole="button"
-              disabled={!savedArchiveId}
-              onPress={() => {
-                if (demoMode) {
-                  setSaved(true);
-                  setError('');
-                  return;
-                }
-                setError(text('zh', 'shareSoon'));
-              }}
-              style={styles.secondaryButtonWide}>
-              <Text style={styles.secondaryText}>{text('zh', 'pushChildren')}</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              disabled={!savedArchiveId}
-              onPress={() => {
-                if (demoMode) {
-                  setSaved(true);
-                  setError('');
-                  return;
-                }
-                setError(text('zh', 'exportSoon'));
-              }}
-              style={styles.secondaryButtonWide}>
-              <Text style={styles.secondaryText}>{text('zh', 'exportPdf')}</Text>
+              onPress={openLastOcrCache}
+              style={styles.cacheButton}>
+              <Text style={styles.cacheButtonText}>{text('zh', 'ocrLastResult')}</Text>
             </Pressable>
           </View>
-          {saved ? <Text style={styles.savedText}>{text('zh', 'savedStatus')}</Text> : null}
-        </View>
-      ) : null}
+        ) : null}
+        {error && !homeLoading ? <Text style={styles.errorText}>{error}</Text> : null}
+      </View>
 
       {homeLoading ? (
         <LoadingBlock label={text('zh', 'archiveLoading')} />
       ) : (
         <>
-          {error && !summaries.length ? (
+          {error &&
+          !recentCard &&
+          !problemSummary &&
+          !otherSummaries.length &&
+          error !== text('zh', 'ocrSoon') &&
+          !isOcrBannerError(error) ? (
             <EmptyBlock label={error} onRetry={loadHome} />
           ) : null}
 
+          {recentCard ? <SummaryCard card={recentCard} /> : null}
+
           {problemSummary ? (
-            <View style={styles.summaryCard}>
-              <Text style={styles.cardTitle}>
-                {problemSummary.title || text('zh', 'healthProblemTitle')}
-              </Text>
-              <Text style={styles.metaLine}>
-                {text('zh', 'examDateLabel')}：{formatDate(problemSummary.exam_date)}
-              </Text>
-              <Text style={styles.metaLine}>
-                {text('zh', 'examNoLabel')}：{problemSummary.exam_no || '—'}
-              </Text>
-              <Text style={styles.summaryBody}>
-                {problemSummary.summary_text || text('zh', 'healthProblemBody')}
-              </Text>
-              {(problemSummary.items || []).map(issue => (
-                <View key={issue.id} style={styles.issueRow}>
-                  <View style={styles.issueDot} />
-                  <Text style={styles.issueText}>{issue.content}</Text>
-                </View>
-              ))}
-            </View>
-          ) : !error ? (
-            <EmptyBlock label={text('zh', 'archiveEmptySummaries')} onRetry={loadHome} />
+            <SummaryCard card={summaryToHomeCard(problemSummary, false)} />
           ) : null}
 
           {otherSummaries.map(item => (
-            <View key={item.id} style={styles.summaryCard}>
-              <Text style={styles.cardTitle}>{item.title}</Text>
-              <Text style={styles.metaLine}>
-                {text('zh', 'examDateLabel')}：{formatDate(item.exam_date)}
-              </Text>
-              <Text style={styles.metaLine}>
-                {text('zh', 'examNoLabel')}：{item.exam_no || '—'}
-              </Text>
-              <Text style={styles.summaryBody}>{item.summary_text}</Text>
-            </View>
+            <SummaryCard key={item.id} card={summaryToHomeCard(item, false)} />
           ))}
+
+          {!recentCard && !problemSummary && !otherSummaries.length && !error ? (
+            <EmptyBlock label={text('zh', 'archiveEmptySummaries')} onRetry={loadHome} />
+          ) : null}
         </>
       )}
 
-      {error && summaries.length ? <Text style={styles.errorText}>{error}</Text> : null}
+      {error && summaries.length && error !== text('zh', 'ocrSoon') && !isOcrBannerError(error) ? (
+        <Text style={styles.errorText}>{error}</Text>
+      ) : null}
 
       <Pressable
         accessibilityRole="button"
@@ -651,6 +1498,27 @@ export default function ArchiveScreen() {
         <Text style={styles.reportButtonText}>{text('zh', 'healthArchiveReport')}</Text>
       </Pressable>
     </ScrollView>
+  );
+}
+
+function SummaryCard({card}: {card: HomeSummaryCard}) {
+  return (
+    <View style={styles.summaryCard}>
+      <Text style={styles.cardTitle}>{card.title}</Text>
+      <Text style={styles.metaLine}>
+        {card.dateLabel}：{formatDate(card.date)}
+      </Text>
+      <Text style={styles.metaLine}>
+        {card.noLabel}：{card.no || '—'}
+      </Text>
+      {card.body ? <Text style={styles.summaryBody}>{card.body}</Text> : null}
+      {card.items.map(issue => (
+        <View key={issue.id} style={styles.issueRow}>
+          <View style={styles.issueDot} />
+          <Text style={styles.issueText}>{issue.content}</Text>
+        </View>
+      ))}
+    </View>
   );
 }
 
@@ -772,6 +1640,83 @@ const styles = StyleSheet.create({
     borderRadius: radius.xl,
     padding: spacing.xl,
     marginTop: spacing.lg,
+  },
+  confirmCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    padding: spacing.xl,
+    marginTop: spacing.md,
+  },
+  confirmSource: {
+    ...typography.label,
+    color: colors.primary,
+    marginTop: -spacing.md,
+    marginBottom: spacing.md,
+  },
+  fieldLabel: {
+    ...typography.label,
+    color: colors.textMuted,
+    marginTop: spacing.md,
+  },
+  fieldInput: {
+    minHeight: 54,
+    marginTop: spacing.xs,
+    borderRadius: radius.md,
+    backgroundColor: colors.backgroundWarm,
+    borderWidth: 1,
+    borderColor: colors.borderNeutral,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    ...typography.bodyLarge,
+    color: colors.textPrimary,
+  },
+  fieldInputTall: {
+    minHeight: 88,
+    textAlignVertical: 'top',
+  },
+  rawBox: {
+    marginTop: spacing.lg,
+    backgroundColor: colors.surfaceBlue,
+    borderRadius: radius.md,
+    padding: spacing.lg,
+  },
+  rawText: {
+    ...typography.bodyLarge,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
+  },
+  cancelButton: {
+    minHeight: 52,
+    borderRadius: radius.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: spacing.sm,
+  },
+  cancelText: {
+    ...typography.bodyStrong,
+    color: colors.textSecondary,
+  },
+  cacheBox: {
+    marginTop: spacing.lg,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderNeutral,
+  },
+  cacheHint: {
+    ...typography.bodyLarge,
+    color: colors.textMuted,
+  },
+  cacheButton: {
+    marginTop: spacing.sm,
+    minHeight: 52,
+    borderRadius: radius.lg,
+    backgroundColor: colors.surfaceBlue,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cacheButtonText: {
+    ...typography.bodyStrong,
+    color: colors.primary,
   },
   infoRow: {
     backgroundColor: colors.surface,
