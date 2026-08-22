@@ -13,7 +13,15 @@ import {
   View,
 } from 'react-native';
 import {text} from '../../shared/i18n/messages';
-import {askAudioStream, askTextStream, clearQaContext} from '../../services/qaApi';
+import {
+  askAudioStream,
+  askTextStream,
+  clearQaContext,
+  sanitizeQaSpokenText,
+  type QaAskDone,
+  type QaAskHandlers,
+  type QaPhase,
+} from '../../services/qaApi';
 import {ApiError} from '../../services/http';
 import {getAccessToken} from '../../services/session';
 import {ensureMicPermission, voiceRecorder} from '../../services/voiceRecorder';
@@ -67,7 +75,9 @@ export default function HomeScreen() {
   const [showRecommendation, setShowRecommendation] = useState(false);
   const [symptomText, setSymptomText] = useState('');
   const [contextId, setContextId] = useState<string | null>(null);
-  const [forceNewContext, setForceNewContext] = useState(true);
+  const [forceNewContext, setForceNewContext] = useState(false);
+  const [phase, setPhase] = useState<QaPhase | undefined>(undefined);
+  const [intakeComplete, setIntakeComplete] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const recordingRef = useRef(false);
   const holdingRef = useRef(false);
@@ -115,6 +125,52 @@ export default function HomeScreen() {
     }
   }
 
+  function applyAskDone(final: QaAskDone, streamedSpoken: string) {
+    setContextId(final.context_id);
+    setForceNewContext(false);
+    if (final.phase) {
+      setPhase(final.phase);
+    }
+    setIntakeComplete(
+      Boolean(final.intake_complete || final.phase === 'diagnosis' || final.phase === 'emergency'),
+    );
+    const spoken = sanitizeQaSpokenText(final.answer_text) || streamedSpoken;
+    if (spoken) {
+      setResult(spoken);
+    }
+    setSymptomText('');
+  }
+
+  function createAskHandlers(state: {
+    streamed: {raw: string};
+    fromVoice: boolean;
+  }): QaAskHandlers {
+    return {
+      onMeta: meta => {
+        setContextId(meta.context_id);
+        setForceNewContext(false);
+        if (state.fromVoice && meta.question_text) {
+          setSymptomText(meta.question_text);
+        }
+      },
+      onPhase: nextPhase => {
+        setPhase(nextPhase);
+        setIntakeComplete(nextPhase === 'diagnosis' || nextPhase === 'emergency');
+      },
+      onToken: delta => {
+        state.streamed.raw += delta;
+        const spoken = sanitizeQaSpokenText(state.streamed.raw);
+        if (spoken) {
+          setResult(spoken);
+          setProcessing(false);
+        }
+      },
+      onDone: final => {
+        applyAskDone(final, sanitizeQaSpokenText(state.streamed.raw));
+      },
+    };
+  }
+
   async function switchToVoiceMode() {
     setInputMode('voice');
     await prepareVoiceMode();
@@ -136,7 +192,6 @@ export default function HomeScreen() {
     }
 
     setError('');
-    setResult('');
     setShowRecommendation(false);
 
     try {
@@ -212,7 +267,7 @@ export default function HomeScreen() {
     setProcessing(true);
     setResult('');
 
-    let streamed = '';
+    const streamed = {raw: ''};
     try {
       const file =
         audio.blob ||
@@ -228,45 +283,19 @@ export default function HomeScreen() {
           file,
           fileName: audio.name,
           lang: 'zh',
-          new_context: forceNewContext || !contextId,
+          ...(forceNewContext ? {new_context: true} : {}),
           audio_format: audio.format,
         },
-        {
-          onMeta: meta => {
-            setContextId(meta.context_id);
-            setForceNewContext(false);
-            if (meta.question_text) {
-              setSymptomText(meta.question_text);
-            }
-          },
-          onToken: delta => {
-            streamed += delta;
-            setResult(streamed);
-            setProcessing(false);
-          },
-          onDone: final => {
-            setContextId(final.context_id);
-            setResult(final.answer_text);
-            setForceNewContext(false);
-            if (final.question_text) {
-              setSymptomText(final.question_text);
-            }
-          },
-        },
+        createAskHandlers({streamed, fromVoice: true}),
         controller.signal,
       );
-      setContextId(done.context_id);
-      setResult(done.answer_text);
-      setForceNewContext(false);
-      if (done.question_text) {
-        setSymptomText(done.question_text);
-      }
+      applyAskDone(done, sanitizeQaSpokenText(streamed.raw));
     } catch (err) {
       if (err instanceof ApiError && err.code === 'timeout' && controller.signal.aborted) {
         return;
       }
       setError(err instanceof ApiError ? err.message : text('zh', 'askFailed'));
-      if (!streamed) {
+      if (!sanitizeQaSpokenText(streamed.raw)) {
         setResult('');
       }
     } finally {
@@ -298,42 +327,25 @@ export default function HomeScreen() {
     setProcessing(true);
     setResult('');
 
-    let streamed = '';
+    const streamed = {raw: ''};
     try {
       const done = await askTextStream(
         token!,
         {
           question: value,
           lang: 'zh',
-          new_context: forceNewContext || !contextId,
+          ...(forceNewContext ? {new_context: true} : {}),
         },
-        {
-          onMeta: meta => {
-            setContextId(meta.context_id);
-            setForceNewContext(false);
-          },
-          onToken: delta => {
-            streamed += delta;
-            setResult(streamed);
-            setProcessing(false);
-          },
-          onDone: final => {
-            setContextId(final.context_id);
-            setResult(final.answer_text);
-            setForceNewContext(false);
-          },
-        },
+        createAskHandlers({streamed, fromVoice: false}),
         controller.signal,
       );
-      setContextId(done.context_id);
-      setResult(done.answer_text);
-      setForceNewContext(false);
+      applyAskDone(done, sanitizeQaSpokenText(streamed.raw));
     } catch (err) {
       if (err instanceof ApiError && err.code === 'timeout' && controller.signal.aborted) {
         return;
       }
       setError(err instanceof ApiError ? err.message : text('zh', 'askFailed'));
-      if (!streamed) {
+      if (!sanitizeQaSpokenText(streamed.raw)) {
         setResult('');
       }
     } finally {
@@ -346,7 +358,6 @@ export default function HomeScreen() {
 
   function handleContinue() {
     setShowRecommendation(false);
-    setResult('');
     setError('');
     setForceNewContext(false);
     setInputMode('text');
@@ -359,6 +370,8 @@ export default function HomeScreen() {
     setSymptomText('');
     setForceNewContext(true);
     setContextId(null);
+    setPhase(undefined);
+    setIntakeComplete(false);
     setInputMode('text');
 
     const token = getAccessToken();
@@ -420,7 +433,9 @@ export default function HomeScreen() {
           {inputMode === 'voice' ? (
             <View style={styles.voiceArea}>
               <Text style={styles.panelText}>
-                {micPreparing ? text('zh', 'voicePreparing') : text('zh', 'instruction')}
+                {micPreparing
+                  ? text('zh', 'voicePreparing')
+                  : text('zh', phase === 'followup' ? 'followupVoiceHint' : 'instruction')}
               </Text>
               <VoiceInputButton
                 lang="zh"
@@ -442,20 +457,25 @@ export default function HomeScreen() {
                 multiline
                 value={symptomText}
                 onChangeText={setSymptomText}
-                placeholder={text('zh', 'symptomInputPlaceholder')}
+                placeholder={text(
+                  'zh',
+                  phase === 'followup' ? 'followupPlaceholder' : 'symptomInputPlaceholder',
+                )}
                 placeholderTextColor={colors.textMuted}
                 style={styles.symptomInput}
               />
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={text('zh', 'submitSymptom')}
+                accessibilityLabel={text('zh', phase === 'followup' ? 'submitFollowup' : 'submitSymptom')}
                 disabled={processing}
                 onPress={submitSymptom}
                 style={[styles.submitButton, processing && styles.disabledButton]}>
                 {processing ? (
                   <ActivityIndicator color={colors.surface} />
                 ) : (
-                  <Text style={styles.submitText}>{text('zh', 'submitSymptom')}</Text>
+                  <Text style={styles.submitText}>
+                    {text('zh', phase === 'followup' ? 'submitFollowup' : 'submitSymptom')}
+                  </Text>
                 )}
               </Pressable>
             </>
@@ -471,37 +491,46 @@ export default function HomeScreen() {
         {processing && !result ? (
           <View style={styles.processing} accessibilityLiveRegion="polite">
             <ActivityIndicator size="large" color={colors.primary} />
-            <Text style={styles.processingText}>{text('zh', 'processing')}</Text>
+            <Text style={styles.processingText}>
+              {text('zh', phase === 'followup' ? 'processingFollowup' : 'processing')}
+            </Text>
           </View>
         ) : result ? (
           <>
-            <ResultCard lang="zh" content={result} />
-            <View style={styles.resultActions}>
-              <Pressable
-                accessibilityRole="button"
-                onPress={handleContinue}
-                style={styles.secondaryAction}>
-                <Text style={styles.secondaryActionText}>{text('zh', 'continueInquiry')}</Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => setShowRecommendation(true)}
-                style={styles.primaryAction}>
-                <Text style={styles.primaryActionText}>{text('zh', 'medicalRecommend')}</Text>
-              </Pressable>
-            </View>
+            <ResultCard key={contextId ?? 'qa-result'} lang="zh" content={result} phase={phase} />
+            {phase === 'followup' ? (
+              <Text style={styles.followupCue}>{text('zh', 'followupCue')}</Text>
+            ) : null}
+            {phase !== 'followup' && phase !== 'emergency' ? (
+              <View style={styles.resultActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleContinue}
+                  style={styles.secondaryAction}>
+                  <Text style={styles.secondaryActionText}>{text('zh', 'continueInquiry')}</Text>
+                </Pressable>
+                {phase === 'diagnosis' || intakeComplete || !phase ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => setShowRecommendation(true)}
+                    style={styles.primaryAction}>
+                    <Text style={styles.primaryActionText}>{text('zh', 'medicalRecommend')}</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
             <Pressable
               accessibilityRole="button"
               onPress={handleNewQuestion}
               style={styles.newQuestionButton}>
               <Text style={styles.newQuestionText}>{text('zh', 'newQuestion')}</Text>
             </Pressable>
-            {showRecommendation && (
+            {showRecommendation && phase !== 'followup' && phase !== 'emergency' ? (
               <View style={styles.recommendationCard}>
                 <Text style={styles.recommendationTitle}>{text('zh', 'recommendationTitle')}</Text>
                 <Text style={styles.recommendationBody}>{text('zh', 'recommendationBody')}</Text>
               </View>
-            )}
+            ) : null}
           </>
         ) : !processing ? (
           <View style={styles.emptyCard}>
@@ -638,6 +667,13 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
   },
   emptyText: {...typography.bodyLarge, color: colors.textSecondary, marginTop: 6, fontSize: moderateScale(16)},
+  followupCue: {
+    marginTop: spacing.sm,
+    fontSize: moderateScale(15),
+    lineHeight: moderateScale(22),
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
   resultActions: {flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md},
   secondaryAction: {
     flex: 1,

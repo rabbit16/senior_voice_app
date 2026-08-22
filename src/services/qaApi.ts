@@ -3,6 +3,20 @@ import {ApiError, apiRequest} from './http';
 
 export type QaLang = 'zh' | 'en';
 
+/** 症状追问阶段：以 done.phase 为准 */
+export type QaPhase = 'followup' | 'diagnosis' | 'emergency';
+
+export type QaAskMeta = {
+  context_id: string;
+  lang: QaLang;
+  question_text: string;
+  context_continued: boolean;
+  turn_index_user: number;
+  turn_index_assistant: number;
+  intake_round?: number;
+  input_mode?: string;
+};
+
 export type QaAskDone = {
   context_id: string;
   lang: QaLang;
@@ -12,17 +26,14 @@ export type QaAskDone = {
   turn_index_assistant: number;
   context_continued: boolean;
   created_at: string;
+  phase?: QaPhase;
+  intake_complete?: boolean;
+  intake_round?: number;
 };
 
 export type QaAskHandlers = {
-  onMeta?: (meta: {
-    context_id: string;
-    lang: QaLang;
-    question_text: string;
-    context_continued: boolean;
-    turn_index_user: number;
-    turn_index_assistant: number;
-  }) => void;
+  onMeta?: (meta: QaAskMeta) => void;
+  onPhase?: (phase: QaPhase) => void;
   onToken?: (delta: string) => void;
   onDone?: (done: QaAskDone) => void;
   onError?: (error: {code: string; message: string}) => void;
@@ -58,7 +69,60 @@ type SseEvent = {
   turn_index_assistant?: number;
   context_continued?: boolean;
   created_at?: string;
+  phase?: string;
+  intake_complete?: boolean;
+  intake_round?: number;
+  input_mode?: string;
 };
+
+const PHASE_TOKEN_RE = /^(?:[【[]\s*)?(FOLLOWUP|DIAGNOSIS|EMERGENCY|INTAKE)(?:\s*[】\]])?\s*[:：]?$/i;
+
+/** 去掉模型可能泄漏的阶段标记，只留给用户看的口语 */
+export function sanitizeQaSpokenText(raw: string): string {
+  if (!raw) {
+    return '';
+  }
+  return raw
+    .replace(/[【[]\s*(FOLLOWUP|DIAGNOSIS|EMERGENCY|INTAKE|追问|初步判断|急救)\s*[】\]]/gi, ' ')
+    .replace(/\b(FOLLOWUP|DIAGNOSIS|EMERGENCY|INTAKE)\b\s*[:：]?\s*/gi, ' ')
+    .replace(/^[ \t]*[:：\-—]+\s*/gm, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function parseQaPhase(value: unknown): QaPhase | undefined {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (raw === 'followup' || raw === 'diagnosis' || raw === 'emergency') {
+    return raw;
+  }
+  return undefined;
+}
+
+function isPhaseMarkerDelta(delta: string): boolean {
+  return PHASE_TOKEN_RE.test(delta.trim());
+}
+
+function toQaAskDone(event: SseEvent): QaAskDone | null {
+  if (!event.context_id || event.question_text == null || event.answer_text == null) {
+    return null;
+  }
+  return {
+    context_id: event.context_id,
+    lang: event.lang || 'zh',
+    question_text: event.question_text,
+    answer_text: sanitizeQaSpokenText(event.answer_text),
+    turn_index_user: event.turn_index_user ?? 0,
+    turn_index_assistant: event.turn_index_assistant ?? 0,
+    context_continued: Boolean(event.context_continued),
+    created_at: event.created_at || new Date().toISOString(),
+    phase: parseQaPhase(event.phase),
+    intake_complete: Boolean(event.intake_complete),
+    intake_round: event.intake_round,
+  };
+}
 
 function parseSseChunk(buffer: string): {events: SseEvent[]; rest: string} {
   const parts = buffer.split(/\n\n/);
@@ -98,28 +162,30 @@ function dispatchSseEvent(event: SseEvent, handlers: QaAskHandlers): boolean {
           context_continued: Boolean(event.context_continued),
           turn_index_user: event.turn_index_user ?? 0,
           turn_index_assistant: event.turn_index_assistant ?? 0,
+          intake_round: event.intake_round,
+          input_mode: event.input_mode,
         });
       }
       return false;
+    case 'phase': {
+      const phase = parseQaPhase(event.phase);
+      if (phase) {
+        handlers.onPhase?.(phase);
+      }
+      return false;
+    }
     case 'token':
-      if (event.delta) {
+      if (event.delta && !isPhaseMarkerDelta(event.delta)) {
         handlers.onToken?.(event.delta);
       }
       return false;
-    case 'done':
-      if (event.context_id && event.question_text && event.answer_text != null) {
-        handlers.onDone?.({
-          context_id: event.context_id,
-          lang: event.lang || 'zh',
-          question_text: event.question_text,
-          answer_text: event.answer_text,
-          turn_index_user: event.turn_index_user ?? 0,
-          turn_index_assistant: event.turn_index_assistant ?? 0,
-          context_continued: Boolean(event.context_continued),
-          created_at: event.created_at || new Date().toISOString(),
-        });
+    case 'done': {
+      const done = toQaAskDone(event);
+      if (done) {
+        handlers.onDone?.(done);
       }
       return true;
+    }
     case 'error':
       handlers.onError?.({
         code: event.code || 'qa_stream_failed',
@@ -158,17 +224,11 @@ async function consumeQaSseResponse(
   let streamError: {code: string; message: string} | null = null;
 
   const consumeEvent = (event: SseEvent) => {
-    if (event.type === 'done' && event.context_id && event.question_text && event.answer_text != null) {
-      done = {
-        context_id: event.context_id,
-        lang: event.lang || 'zh',
-        question_text: event.question_text,
-        answer_text: event.answer_text,
-        turn_index_user: event.turn_index_user ?? 0,
-        turn_index_assistant: event.turn_index_assistant ?? 0,
-        context_continued: Boolean(event.context_continued),
-        created_at: event.created_at || new Date().toISOString(),
-      };
+    if (event.type === 'done') {
+      const parsed = toQaAskDone(event);
+      if (parsed) {
+        done = parsed;
+      }
     }
     if (event.type === 'error') {
       streamError = {
@@ -249,6 +309,7 @@ async function withQaFetchTimeout<T>(
 
 /**
  * 适老化文字问答：POST /qa/ask（SSE）。
+ * 默认不传 new_context，由服务端沿用当前上下文；仅用户点「新问题」时传 true。
  * Web / 支持流式的环境会边收边回调；否则解析完整响应。
  */
 export async function askTextStream(
@@ -268,7 +329,7 @@ export async function askTextStream(
       body: JSON.stringify({
         question: input.question,
         lang: input.lang || 'zh',
-        new_context: Boolean(input.new_context),
+        ...(input.new_context ? {new_context: true} : {}),
       }),
       signal: mergedSignal,
     });
@@ -307,7 +368,9 @@ export async function askAudioStream(
       formData.append('file', input.file as unknown as Blob);
     }
     formData.append('lang', input.lang || 'zh');
-    formData.append('new_context', String(Boolean(input.new_context)));
+    if (input.new_context) {
+      formData.append('new_context', 'true');
+    }
     if (input.audio_format) {
       formData.append('audio_format', input.audio_format);
     }
