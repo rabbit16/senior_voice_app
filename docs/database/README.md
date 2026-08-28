@@ -19,7 +19,7 @@
 | 就诊档案 | `medical_archives` `archive_ocr_jobs` | 识别就诊单、保存档案 |
 | 健康总结 | `health_summaries` `health_summary_items` | 档案页「健康问题总结」 |
 | 健康报告 | `health_reports` `health_report_findings` `report_glossaries` | 「健康档案报告」列表/详情 |
-| 推送导出 | `archive_shares` `archive_exports` | 推送子女、导出 PDF |
+| 推送导出 | `archive_shares` `archive_exports` `report_shares` `report_exports` | 推送子女、导出 PDF |
 | 家属 | `family_contacts` `family_push_rules` | 个人中心联系人与规则 |
 | 审计（可选） | `audit_logs` | 联调排障 |
 
@@ -41,7 +41,9 @@ users
  ├─ health_summaries (1:N)
  │    └─ health_summary_items (1:N)
  └─ health_reports (1:N)
-      └─ health_report_findings (1:N)
+      ├─ health_report_findings (1:N)
+      ├─ report_shares → family_contacts
+      └─ report_exports → media_files
 
 report_glossaries （全局配置，不挂 user）
 ```

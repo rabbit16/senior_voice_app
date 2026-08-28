@@ -3,6 +3,10 @@ package com.seniorvoiceapp
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -131,17 +135,20 @@ class ImagePickerModule(
             copyUriToCache(uri)
           }
         cameraFile = null
-        if (file.length() > MAX_BYTES) {
+        val prepared = prepareForUpload(file)
+        if (prepared !== file && file.exists()) {
           file.delete()
+        }
+        if (prepared.length() > MAX_BYTES) {
+          prepared.delete()
           finishReject("image_too_large", "图片超过 10MB，请换一张更小的照片")
           return@Thread
         }
-        val mime = guessMime(file.name)
         val map =
           Arguments.createMap().apply {
-            putString("uri", toFileUri(file.absolutePath))
-            putString("type", mime)
-            putString("name", file.name)
+            putString("uri", toContentUri(prepared))
+            putString("type", guessMime(prepared.name))
+            putString("name", prepared.name)
           }
         val pending = pickerPromise
         pickerPromise = null
@@ -186,13 +193,82 @@ class ImagePickerModule(
     pending?.reject(code, message)
   }
 
+  /**
+   * 相机原图经常 5～12MB。走 natapp 上传会被掐断，App 就会显示「连不上」。
+   * 压到约 1920 边长的 JPEG，OCR 仍然够用。
+   * 同时改成 FileProvider 的 content://，避免 OkHttp 读 file:// 失败。
+   */
+  private fun prepareForUpload(src: File): File {
+    if (src.length() <= SMALL_JPEG_BYTES && src.name.lowercase().endsWith(".jpg")) {
+      return src
+    }
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(src.absolutePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+      return src
+    }
+    var sample = 1
+    while (bounds.outWidth / sample > MAX_SIDE || bounds.outHeight / sample > MAX_SIDE) {
+      sample *= 2
+    }
+    val bitmap =
+      BitmapFactory.decodeFile(src.absolutePath, BitmapFactory.Options().apply { inSampleSize = sample })
+        ?: return src
+    val oriented = rotateByExif(src.absolutePath, bitmap)
+    val imagesDir = File(reactContext.cacheDir, "images").apply { mkdirs() }
+    val out = File(imagesDir, "ocr_${System.currentTimeMillis()}.jpg")
+    try {
+      FileOutputStream(out).use { fos ->
+        if (!oriented.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, fos)) {
+          throw IOException("压缩图片失败")
+        }
+      }
+    } catch (error: Exception) {
+      out.delete()
+      recycleBitmaps(bitmap, oriented)
+      return src
+    }
+    recycleBitmaps(bitmap, oriented)
+    return if (out.length() > 0L) out else src
+  }
+
+  private fun toContentUri(file: File): String =
+    FileProvider.getUriForFile(reactContext, "${reactContext.packageName}.fileprovider", file).toString()
+
   companion object {
     private const val REQUEST_ALBUM = 0x51A1
     private const val REQUEST_CAMERA = 0x51A2
     private const val MAX_BYTES = 10L * 1024L * 1024L
+    private const val SMALL_JPEG_BYTES = 400L * 1024L
+    private const val MAX_SIDE = 1920
+    private const val JPEG_QUALITY = 80
 
-    private fun toFileUri(path: String): String =
-      if (path.startsWith("file://")) path else "file://$path"
+    private fun rotateByExif(path: String, bitmap: Bitmap): Bitmap {
+      val orientation =
+        try {
+          ExifInterface(path).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        } catch (_: Exception) {
+          return bitmap
+        }
+      val degrees =
+        when (orientation) {
+          ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+          ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+          ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+          else -> return bitmap
+        }
+      val matrix = Matrix().apply { postRotate(degrees) }
+      return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
+
+    private fun recycleBitmaps(original: Bitmap, oriented: Bitmap) {
+      if (oriented !== original && !oriented.isRecycled) {
+        oriented.recycle()
+      }
+      if (!original.isRecycled) {
+        original.recycle()
+      }
+    }
 
     private fun guessMime(name: String): String {
       val lower = name.lowercase()

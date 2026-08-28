@@ -153,11 +153,11 @@ import {recognizeSpeech, askQuestion} from '../../services/qaApi';
 
 ## 如何接入真实问答接口
 
-见 `docs/API.md`。典型流程：
+见 `docs/API.md`。首页当前流程：
 
-1. `POST /voice/recognize` 得到文本
-2. `POST /qa/sessions` 得到回答
-3. 可选：`POST /qa/sessions/{id}/recommendations` 得到就医建议
+1. 文字：`POST /qa/ask`（SSE）；语音：`POST /qa/ask/audio`
+2. 模型先追问症状，足够后再给初步判断（`phase=diagnosis`）
+3. 用户点「就医推荐」：`POST /qa/sessions/{context_id}/recommendations`
 
 ## 不建议做的事
 

@@ -28,10 +28,11 @@ SET @user_id = (
 -- 没有该用户则创建演示账号（密码需后端自行设置；验证码登录可直接用）
 SET @user_id = IFNULL(@user_id, '11111111-1111-4111-8111-111111111111');
 
-INSERT INTO users (id, phone, password_hash, display_name, preferred_lang, status)
-VALUES (@user_id, @seed_phone, NULL, '毕小雪', 'zh', 'active')
+INSERT INTO users (id, phone, email, password_hash, display_name, preferred_lang, status)
+VALUES (@user_id, @seed_phone, 'seed@qq.com', NULL, '毕小雪', 'zh', 'active')
 ON DUPLICATE KEY UPDATE
   display_name = VALUES(display_name),
+  email = IFNULL(email, VALUES(email)),
   deleted_at = NULL;
 
 -- 以手机号为准，重新取真实 user_id（避免 phone 已存在但 id 不同）

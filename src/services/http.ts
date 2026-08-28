@@ -135,7 +135,7 @@ export async function apiRequest<T>(options: RequestOptions): Promise<T> {
     }
     throw new ApiError(0, {
       code: 'network_error',
-      message: '网络异常，请确认后端已启动，且地址为 127.0.0.1（Web）或正确 IP',
+      message: `网络异常，连不上 ${env.apiBaseUrl}，请确认内网穿透和后端已启动`,
     });
   } finally {
     clearTimeout(timeout);

@@ -13,7 +13,7 @@
 | [`../database/schema.sql`](../database/schema.sql) | 建表 |
 | [`../database/seed_archive.sql`](../database/seed_archive.sql) | 档案页种子数据 |
 
-接口契约：[`../API.md`](../API.md) 第 2.4.0（展示页拼法）及 2.4.1 / 2.4.2 / 2.4 节；机器可读：[`../openapi.yaml`](../openapi.yaml)。
+接口契约：[`../API.md`](../API.md) 第 2.3.1（就医推荐）及 2.4.0（档案展示页拼法）/ 2.4.1 / 2.4.2 / 2.4 节；机器可读：[`../openapi.yaml`](../openapi.yaml)。
 
 ## 最快联调
 

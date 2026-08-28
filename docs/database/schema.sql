@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS users (
     phone           VARCHAR(20)  NOT NULL COMMENT '登录手机号，唯一',
     password_hash   VARCHAR(255) NULL COMMENT 'bcrypt/argon2 哈希；可为空（仅验证码注册）',
     display_name    VARCHAR(64)  NULL COMMENT '展示名',
+    email           VARCHAR(128) NULL COMMENT '账号邮箱；推送走 QQ SMTP，不发短信',
+    active_email    VARCHAR(128) GENERATED ALWAYS AS (
+        IF(deleted_at IS NULL AND email IS NOT NULL AND email <> '', email, NULL)
+    ) STORED,
     preferred_lang  VARCHAR(8)   NOT NULL DEFAULT 'zh' COMMENT 'zh | en',
     status          VARCHAR(16)  NOT NULL DEFAULT 'active' COMMENT 'active | disabled',
     created_at      DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -29,6 +33,7 @@ CREATE TABLE IF NOT EXISTS users (
     deleted_at      DATETIME(6)  NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uq_users_phone (phone),
+    UNIQUE KEY uq_users_active_email (active_email),
     CONSTRAINT ck_users_lang CHECK (preferred_lang IN ('zh', 'en')),
     CONSTRAINT ck_users_status CHECK (status IN ('active', 'disabled'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -170,11 +175,14 @@ CREATE TABLE IF NOT EXISTS qa_recommendations (
     id            CHAR(36)     NOT NULL,
     session_id    CHAR(36)     NOT NULL COMMENT '基于整个会话上下文生成',
     user_id       CHAR(36)     NOT NULL,
-    title         VARCHAR(128) NOT NULL,
-    body          TEXT         NOT NULL,
+    title         VARCHAR(128) NOT NULL COMMENT '卡片标题，如 推荐就诊方向',
+    department    VARCHAR(128) NOT NULL COMMENT '推荐科室，如 呼吸内科或全科',
+    care_hint     VARCHAR(255) NOT NULL COMMENT '去哪看：社区门诊 / 专科 / 急诊',
+    body          TEXT         NOT NULL COMMENT '原因说明，给老人读的完整段落',
     risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low' COMMENT 'low | medium | high',
     disclaimer    TEXT         NOT NULL,
     created_at    DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at    DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
     UNIQUE KEY uq_qa_recommendations_session (session_id),
     KEY idx_qa_recommendations_user (user_id),
@@ -319,16 +327,27 @@ CREATE TABLE IF NOT EXISTS report_glossaries (
   COMMENT='体检报告术语释义（全局配置，非按用户）';
 
 CREATE TABLE IF NOT EXISTS family_contacts (
-    id          CHAR(36)     NOT NULL,
-    user_id     CHAR(36)     NOT NULL,
-    name        VARCHAR(64)  NOT NULL COMMENT '女儿 / 儿子 / 自定义',
-    phone       VARCHAR(20)  NOT NULL,
-    relation    VARCHAR(32)  NULL COMMENT 'daughter | son | other',
-    created_at  DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at  DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    deleted_at  DATETIME(6)  NULL,
+    id              CHAR(36)     NOT NULL,
+    user_id         CHAR(36)     NOT NULL,
+    name            VARCHAR(64)  NOT NULL COMMENT '女儿 / 儿子 / 自定义',
+    phone           VARCHAR(20)  NOT NULL,
+    email           VARCHAR(128) NOT NULL COMMENT '子女接收推送的邮箱（QQ SMTP 发送到此地址）',
+    relation        VARCHAR(32)  NULL COMMENT 'daughter | son | other',
+    notify_enabled  TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '是否接收自动推送',
+    -- 未删除时同一用户手机号、邮箱唯一
+    active_phone    VARCHAR(20)  GENERATED ALWAYS AS (
+        IF(deleted_at IS NULL, phone, NULL)
+    ) STORED,
+    active_email    VARCHAR(128) GENERATED ALWAYS AS (
+        IF(deleted_at IS NULL, email, NULL)
+    ) STORED,
+    created_at      DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at      DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    deleted_at      DATETIME(6)  NULL,
     PRIMARY KEY (id),
     KEY idx_family_contacts_user (user_id),
+    UNIQUE KEY uq_family_contacts_user_active_phone (user_id, active_phone),
+    UNIQUE KEY uq_family_contacts_user_active_email (user_id, active_email),
     CONSTRAINT fk_family_contacts_user FOREIGN KEY (user_id) REFERENCES users (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='家属联系人：/family/contacts';
@@ -339,6 +358,7 @@ CREATE TABLE IF NOT EXISTS archive_shares (
     user_id       CHAR(36)     NOT NULL,
     contact_id    CHAR(36)     NOT NULL,
     message       TEXT         NULL,
+    attach_pdf    TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '通知是否附带 PDF 链接',
     status        VARCHAR(16)  NOT NULL DEFAULT 'queued' COMMENT 'queued | sent | failed',
     created_at    DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     sent_at       DATETIME(6)  NULL,
@@ -358,6 +378,7 @@ CREATE TABLE IF NOT EXISTS archive_exports (
     user_id        CHAR(36)      NOT NULL,
     pdf_media_id   CHAR(36)      NULL,
     download_url   VARCHAR(1024) NULL,
+    filename       VARCHAR(255)  NULL,
     expires_at     DATETIME(6)   NULL,
     status         VARCHAR(16)   NOT NULL DEFAULT 'ready' COMMENT 'pending | ready | failed',
     created_at     DATETIME(6)   NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -371,12 +392,53 @@ CREATE TABLE IF NOT EXISTS archive_exports (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='导出 PDF：GET /archives/{id}/export';
 
+CREATE TABLE IF NOT EXISTS report_shares (
+    id            CHAR(36)     NOT NULL,
+    report_id     CHAR(36)     NOT NULL,
+    user_id       CHAR(36)     NOT NULL,
+    contact_id    CHAR(36)     NOT NULL,
+    message       TEXT         NULL,
+    attach_pdf    TINYINT(1)   NOT NULL DEFAULT 1,
+    status        VARCHAR(16)  NOT NULL DEFAULT 'queued' COMMENT 'queued | sent | failed',
+    created_at    DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    sent_at       DATETIME(6)  NULL,
+    PRIMARY KEY (id),
+    KEY idx_report_shares_report (report_id),
+    CONSTRAINT fk_report_shares_report
+        FOREIGN KEY (report_id) REFERENCES health_reports (id) ON DELETE CASCADE,
+    CONSTRAINT fk_report_shares_user FOREIGN KEY (user_id) REFERENCES users (id),
+    CONSTRAINT fk_report_shares_contact FOREIGN KEY (contact_id) REFERENCES family_contacts (id),
+    CONSTRAINT ck_report_share_status CHECK (status IN ('queued', 'sent', 'failed'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='推送子女：POST /health-reports/{id}/share';
+
+CREATE TABLE IF NOT EXISTS report_exports (
+    id             CHAR(36)      NOT NULL,
+    report_id      CHAR(36)      NOT NULL,
+    user_id        CHAR(36)      NOT NULL,
+    pdf_media_id   CHAR(36)      NULL,
+    download_url   VARCHAR(1024) NULL,
+    filename       VARCHAR(255)  NULL,
+    expires_at     DATETIME(6)   NULL,
+    status         VARCHAR(16)   NOT NULL DEFAULT 'ready' COMMENT 'pending | ready | failed',
+    created_at     DATETIME(6)   NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    KEY idx_report_exports_report (report_id),
+    CONSTRAINT fk_report_exports_report
+        FOREIGN KEY (report_id) REFERENCES health_reports (id) ON DELETE CASCADE,
+    CONSTRAINT fk_report_exports_user FOREIGN KEY (user_id) REFERENCES users (id),
+    CONSTRAINT fk_report_exports_pdf FOREIGN KEY (pdf_media_id) REFERENCES media_files (id),
+    CONSTRAINT ck_report_export_status CHECK (status IN ('pending', 'ready', 'failed'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='导出 PDF：GET /health-reports/{id}/export';
+
 CREATE TABLE IF NOT EXISTS family_push_rules (
-    user_id           CHAR(36)    NOT NULL,
-    on_record_saved   TINYINT(1)  NOT NULL DEFAULT 1 COMMENT '就诊单保存后推送',
-    on_abnormal       TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '异常指标提醒',
-    on_visit          TINYINT(1)  NOT NULL DEFAULT 1 COMMENT '就诊复查提醒',
-    updated_at        DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    user_id            CHAR(36)    NOT NULL,
+    on_record_saved    TINYINT(1)  NOT NULL DEFAULT 1 COMMENT '就诊单保存后推送',
+    on_abnormal        TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '异常指标提醒',
+    on_visit           TINYINT(1)  NOT NULL DEFAULT 1 COMMENT '就诊复查提醒',
+    abnormal_metrics   JSON        NOT NULL DEFAULT (JSON_ARRAY()) COMMENT '异常指标白名单，空数组=全部',
+    updated_at         DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (user_id),
     CONSTRAINT fk_family_push_rules_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -408,6 +470,7 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- 登录页: users, sms_codes, auth_sessions
 -- 问询页: voice_recognize_jobs, qa_sessions, qa_messages, qa_recommendations, media_files
 -- 档案页: medical_archives, archive_ocr_jobs, health_summaries/items,
---         health_reports/findings, report_glossaries, archive_shares/exports
+--         health_reports/findings, report_glossaries, archive_shares/exports,
+--         report_shares/exports
 -- 个人中心: users, user_preferences, family_contacts, family_push_rules
 -- =============================================================================

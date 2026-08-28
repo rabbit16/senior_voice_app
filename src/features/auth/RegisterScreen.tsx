@@ -11,7 +11,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import {isValidPassword, isValidPhone, normalizePhone} from '../../shared/auth/validators';
+import {isValidEmail, isValidPassword, isValidPhone, normalizeEmail, normalizePhone} from '../../shared/auth/validators';
 import {text} from '../../shared/i18n/messages';
 import {registerWithSms, sendSmsCode} from '../../services/authApi';
 import {ApiError} from '../../services/http';
@@ -26,6 +26,7 @@ type Props = {
 
 export default function RegisterScreen({onRegister, onBackToLogin}: Props) {
   const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -78,6 +79,15 @@ export default function RegisterScreen({onRegister, onBackToLogin}: Props) {
       setError(text('zh', 'phoneFormatError'));
       return;
     }
+    const trimmedEmail = normalizeEmail(email);
+    if (!trimmedEmail) {
+      setError(text('zh', 'emailError'));
+      return;
+    }
+    if (!isValidEmail(trimmedEmail)) {
+      setError(text('zh', 'emailFormatError'));
+      return;
+    }
     if (!trimmedCode) {
       setError(text('zh', 'codeError'));
       return;
@@ -101,6 +111,7 @@ export default function RegisterScreen({onRegister, onBackToLogin}: Props) {
     try {
       const session = await registerWithSms({
         phone: trimmedPhone,
+        email: trimmedEmail,
         code: trimmedCode,
         password,
         display_name: trimmedName || undefined,
@@ -108,7 +119,11 @@ export default function RegisterScreen({onRegister, onBackToLogin}: Props) {
       });
       onRegister(session);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : text('zh', 'networkError'));
+      if (err instanceof ApiError && err.code === 'email_conflict') {
+        setError(text('zh', 'emailConflict'));
+      } else {
+        setError(err instanceof ApiError ? err.message : text('zh', 'networkError'));
+      }
     } finally {
       setLoading(false);
     }
@@ -135,6 +150,18 @@ export default function RegisterScreen({onRegister, onBackToLogin}: Props) {
               value={phone}
               onChangeText={setPhone}
               placeholder={text('zh', 'phonePlaceholder')}
+              placeholderTextColor={colors.textMuted}
+              style={styles.input}
+            />
+
+            <TextInput
+              accessibilityLabel={text('zh', 'emailLabel')}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoCorrect={false}
+              value={email}
+              onChangeText={setEmail}
+              placeholder={text('zh', 'emailPlaceholder')}
               placeholderTextColor={colors.textMuted}
               style={styles.input}
             />

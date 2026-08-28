@@ -184,6 +184,22 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UserProfile'
+    patch:
+      tags: [me]
+      summary: 更新邮箱 / 昵称
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMeRequest'
+      responses:
+        '200':
+          description: 更新后的资料
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
 
   /me/preferences:
     get:
@@ -275,16 +291,33 @@ paths:
   /qa/sessions/{session_id}/recommendations:
     post:
       tags: [qa]
-      summary: 生成就医建议
+      summary: 生成就医推荐
+      description: |
+        基于整段问答会话生成结构化就医推荐卡片（首页「就医推荐」按钮）。
+        路径 {session_id} 等于 /qa/ask 的 context_id（qa_sessions.id）。
+        与会话 1:1：已有推荐且此后无新消息时返回缓存；force=true 或对话有更新则重新生成。
+        前端只在 phase=diagnosis / intake_complete 后调用。
       parameters:
         - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MedicalRecommendationRequest'
       responses:
         '200':
-          description: 建议
+          description: 就医推荐卡片
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MedicalRecommendation'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
 
   /health-summaries:
     get:
@@ -351,6 +384,40 @@ paths:
                 $ref: '#/components/schemas/HealthReportDetail'
         '404':
           $ref: '#/components/responses/Error'
+
+  /health-reports/{report_id}/share:
+    post:
+      tags: [health-reports]
+      summary: 把体检报告推给子女
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShareArchiveRequest'
+      responses:
+        '200':
+          description: 推送结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShareArchiveResponse'
+
+  /health-reports/{report_id}/export:
+    get:
+      tags: [health-reports]
+      summary: 导出体检报告 PDF 下载链接
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+      responses:
+        '200':
+          description: 下载信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportPdfResponse'
 
   /report-glossaries:
     get:
@@ -634,6 +701,7 @@ components:
       name: session_id
       in: path
       required: true
+      description: 问答会话 ID，等于 /qa/ask 返回的 context_id
       schema:
         type: string
     ArchiveId:
@@ -713,10 +781,14 @@ components:
 
     RegisterRequest:
       type: object
-      required: [phone, code, password]
+      required: [phone, email, code, password]
       properties:
         phone:
           type: string
+        email:
+          type: string
+          format: email
+          description: 账号邮箱，必填
         code:
           type: string
         password:
@@ -799,6 +871,10 @@ components:
           type: string
         phone:
           type: string
+        email:
+          type: string
+          format: email
+          nullable: true
         display_name:
           type: string
           nullable: true
@@ -807,6 +883,16 @@ components:
         created_at:
           type: string
           format: date-time
+
+    UpdateMeRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+          maxLength: 64
 
     LoginResponse:
       allOf:
@@ -866,21 +952,59 @@ components:
           type: string
           format: date-time
 
+    MedicalRecommendationRequest:
+      type: object
+      properties:
+        force:
+          type: boolean
+          default: false
+          description: true 时强制按当前整段对话重新生成
+
     MedicalRecommendation:
       type: object
-      required: [session_id, title, body, risk_level, disclaimer]
+      required:
+        - id
+        - session_id
+        - title
+        - department
+        - care_hint
+        - body
+        - risk_level
+        - disclaimer
+        - created_at
+        - updated_at
       properties:
+        id:
+          type: string
         session_id:
           type: string
+          description: 等于 /qa/ask 的 context_id
         title:
           type: string
+          example: 推荐就诊方向
+        department:
+          type: string
+          description: 推荐科室，1～2 个中文全称
+          example: 呼吸内科或全科
+        care_hint:
+          type: string
+          description: 去哪看（社区门诊 / 专科 / 急诊）
+          example: 建议先去社区医院门诊；如胸痛或呼吸困难请急诊
         body:
           type: string
+          description: 给老人读的原因说明，2～4 句
         risk_level:
           type: string
           enum: [low, medium, high]
         disclaimer:
           type: string
+          example: 本建议不能替代医生诊断
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
 
     RiskLevel:
       type: string
@@ -1166,8 +1290,13 @@ components:
           type: array
           items:
             type: string
+          minItems: 1
         message:
           type: string
+          maxLength: 200
+        attach_pdf:
+          type: boolean
+          default: true
 
     ShareArchiveResponse:
       type: object
@@ -1177,20 +1306,28 @@ components:
           type: boolean
         shared_count:
           type: integer
+        failed_count:
+          type: integer
+          default: 0
 
     ExportPdfResponse:
       type: object
-      required: [download_url, expires_in]
+      required: [download_url, expires_in, status]
       properties:
         download_url:
           type: string
           format: uri
         expires_in:
           type: integer
+        filename:
+          type: string
+        status:
+          type: string
+          enum: [ready]
 
     FamilyContact:
       type: object
-      required: [id, name, phone, created_at]
+      required: [id, name, phone, email, notify_enabled, created_at]
       properties:
         id:
           type: string
@@ -1198,8 +1335,14 @@ components:
           type: string
         phone:
           type: string
+        email:
+          type: string
+          format: email
         relation:
           type: string
+          enum: [daughter, son, other]
+        notify_enabled:
+          type: boolean
         created_at:
           type: string
           format: date-time
@@ -1215,14 +1358,26 @@ components:
 
     CreateFamilyContactRequest:
       type: object
-      required: [name, phone]
+      required: [name, phone, email]
       properties:
         name:
           type: string
+          minLength: 1
+          maxLength: 64
         phone:
           type: string
+          description: 大陆 11 位手机号
+        email:
+          type: string
+          format: email
+          description: 推送发到此邮箱（QQ SMTP）
         relation:
           type: string
+          enum: [daughter, son, other]
+          default: other
+        notify_enabled:
+          type: boolean
+          default: true
 
     UpdateFamilyContactRequest:
       type: object
@@ -1231,12 +1386,18 @@ components:
           type: string
         phone:
           type: string
+        email:
+          type: string
+          format: email
         relation:
           type: string
+          enum: [daughter, son, other]
+        notify_enabled:
+          type: boolean
 
     PushRules:
       type: object
-      required: [on_record_saved, on_abnormal, on_visit]
+      required: [on_record_saved, on_abnormal, on_visit, abnormal_metrics]
       properties:
         on_record_saved:
           type: boolean
@@ -1244,6 +1405,18 @@ components:
           type: boolean
         on_visit:
           type: boolean
+        abnormal_metrics:
+          type: array
+          items:
+            type: string
+            enum:
+              - bmi
+              - blood_pressure
+              - blood_lipid
+              - blood_glucose
+              - liver
+              - kidney
+              - other
 
 security:
   - bearerAuth: []

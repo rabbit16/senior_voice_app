@@ -67,11 +67,11 @@
 
 | 能力 | 表 | 用法 |
 |------|----|------|
-| 资料 | `users` | `display_name`、`phone`、`preferred_lang` |
+| 资料 | `users` | `display_name`、`phone`、`email`、`preferred_lang` |
 | 语言/字体等偏好 | `user_preferences` | 与 `users` 1:1；预留 `font_scale`、`high_contrast` |
 | 改密码 | `users.password_hash` | 已有密码需校验旧密码 |
-| 家属列表 | `family_contacts` | 女儿/儿子/自定义；软删除 |
-| 推送开关 | `family_push_rules` | 与用户 1:1：`on_record_saved` / `on_abnormal` / `on_visit` |
+| 家属列表 | `family_contacts` | 女儿/儿子/自定义；必填 `email`（QQ SMTP 推送）；`notify_enabled` 控制自动推送；软删除 |
+| 推送开关 | `family_push_rules` | 与用户 1:1：三个开关 + `abnormal_metrics` 指标白名单 |
 
 **为什么偏好单独表？**  
 账号安全字段（密码、状态）和 UI 偏好生命周期不同，扩展设置页时不必动 `users`。
@@ -83,18 +83,20 @@
 ### 4.3 首页问询（按住说话 / 文字 · 多轮对话）
 
 **原先没有多轮**：旧设计把「一问一答」塞进 `qa_sessions` 一行。  
-**现设计**：`qa_sessions` = 会话容器（唯一 `session_id`），`qa_messages` = 每一轮发言。
+**现设计**：`qa_sessions` = 会话容器（唯一 `session_id`），`qa_messages` = 每一轮发言。  
+**前端实际入口**：文字 `POST /qa/ask`、语音 `POST /qa/ask/audio`；返回的 `context_id` **就是** `qa_sessions.id`。
 
 ```text
-首轮：POST /qa/sessions
-  → 创建 qa_sessions（拿到 session_id）
+首轮：POST /qa/ask 或 /qa/ask/audio
+  → 创建 qa_sessions（id = context_id）
   → 写入 qa_messages turn=1 user + turn=2 assistant
 
-追问：POST /qa/sessions/{session_id}/messages
-  → 按 turn_index 追加 user / assistant
+追问：同一 context_id 继续追加 qa_messages
   → 推理时按 session_id 拉取全部 messages 作为上下文
 
-列表/回看：GET /qa/sessions、GET /qa/sessions/{id}
+就医推荐：用户看到初步判断后点「就医推荐」
+  → POST /qa/sessions/{context_id}/recommendations
+  → 基于整段会话 upsert qa_recommendations（1:1）
 ```
 
 | 表 | 何时写 | 读什么 |
@@ -103,7 +105,7 @@
 | `voice_recognize_jobs` | `POST /voice/recognize` | 识别文本；可挂到本轮 `qa_messages.voice_job_id` |
 | `qa_sessions` | 开新对话时 | `id` 即 session_id；`title`/`message_count`/`last_message_at` 方便列表 |
 | `qa_messages` | 每一轮用户问、助手答 | `role` + `content` + `turn_index`；还原多轮历史 |
-| `qa_recommendations` | 点「医疗推荐」 | 基于**整段会话**上下文生成；与 session 1:1 |
+| `qa_recommendations` | 点「就医推荐」 | 基于**整段会话**生成结构化卡片（`department` / `care_hint` / `body` / `risk_level`）；与 session 1:1；对话未变则返回缓存 |
 
 **文字模式**：`input_mode=text` 写在对应的 **user** 消息上，可不建 `voice_recognize_jobs`。
 
@@ -141,10 +143,10 @@ OCR 临时结果 → archive_ocr_jobs
 
 | 动作 | 表 |
 |------|----|
-| 推送给子女 | `archive_shares` → 指向 `family_contacts`；状态 queued/sent/failed |
-| 导出 PDF | `archive_exports` + 可选 `media_files`；返回带过期的 `download_url` |
+| 推送给子女 | 就诊单 → `archive_shares`；体检 → `report_shares`。均指向 `family_contacts`；状态 queued/sent/failed |
+| 导出 PDF | 就诊单 → `archive_exports`；体检 → `report_exports`。返回带过期的 `download_url` |
 
-推送前应看 `family_push_rules`（例如仅在「就诊单保存后」开启时自动推）。
+自动推送看 `family_push_rules` + 联系人 `notify_enabled`。手工点「推送子女」不受规则拦截。
 
 ---
 
@@ -191,6 +193,8 @@ users
  │                      └──N── archive_exports → media_files
  ├─ 1:N  health_summaries ──N── health_summary_items
  └─ 1:N  health_reports ──N── health_report_findings
+                           ├──N── report_shares → family_contacts
+                           └──N── report_exports → media_files
 
 media_files ← 被语音、OCR、报告 PDF、导出 PDF、消息音频 多处引用
 report_glossaries ← 全局配置，无 user_id
@@ -215,7 +219,7 @@ ER 图（中文，可导入 draw.io）：[`er.mmd`](./er.mmd)
 1. 存音频 → `media_files`；识别 → `voice_recognize_jobs`  
 2. 首轮：建 `qa_sessions`，写 2 条 `qa_messages`（user / assistant）  
 3. 追问：同一 `session_id` 继续追加 `qa_messages`；加载历史再调模型  
-4. 可选：基于整段会话写/更新 `qa_recommendations`
+4. 用户点「就医推荐」：读整段 `qa_messages`，upsert `qa_recommendations`（科室 / 去哪看 / 原因 / 风险）
 
 ### 就诊单 OCR 保存并推送
 

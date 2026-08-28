@@ -1,0 +1,813 @@
+openapi: 3.0.3
+info:
+  title: rag-sys HTTP API
+  version: 0.1.0
+  description: |
+    无状态 RAG 服务。本规范供其它系统生成客户端或导入网关。
+
+    **不是** OpenAI Chat Completions 协议。业务前缀默认 `/api/v1`。
+    人类说明见同目录 `API.md`。
+
+    流式问答与非流式共用 `POST /api/v1/queries`，由请求体 `stream` 切换。
+  contact:
+    name: rag-sys
+servers:
+  - url: http://127.0.0.1:8001
+    description: 本机 make local
+  - url: http://127.0.0.1:8000
+    description: Docker Compose 网关
+tags:
+  - name: health
+    description: 存活与就绪，无 API Key
+  - name: collections
+    description: 向量集合
+  - name: documents
+    description: 入库与按文档删除
+  - name: retrievals
+    description: 只检索不生成
+  - name: queries
+    description: 检索 + LLM；可 SSE 流式
+security:
+  - ApiKeyAuth: []
+  - {}
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: 进程存活
+      security: []
+      operationId: healthz
+      responses:
+        "200":
+          description: 存活
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthzResponse"
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: 向量库就绪
+      security: []
+      operationId: readyz
+      responses:
+        "200":
+          description: 就绪
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyzResponse"
+        "502":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/collections:
+    get:
+      tags: [collections]
+      summary: 列出集合
+      operationId: listCollections
+      responses:
+        "200":
+          description: 集合列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [collections]
+      summary: 创建集合（可省略，首次入库会自动创建）
+      operationId: createCollection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionCreate"
+            example:
+              name: triage
+              description: 问诊导诊
+              dim: 384
+      responses:
+        "201":
+          description: 已创建或已存在且维度一致
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/collections/{name}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionName"
+    get:
+      tags: [collections]
+      summary: 获取集合
+      operationId: getCollection
+      responses:
+        "200":
+          description: 集合信息
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [collections]
+      summary: 删除集合及其全部向量
+      operationId: deleteCollection
+      responses:
+        "200":
+          description: 已删除
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedCollectionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/documents/text:
+    post:
+      tags: [documents]
+      summary: 纯文本入库
+      operationId: ingestText
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TextIngestRequest"
+            example:
+              collection: kb
+              text: RAG 把检索片段作为大模型上下文。
+              source: note.txt
+              metadata:
+                lang: zh
+              chunk_size: 512
+              chunk_overlap: 64
+      responses:
+        "201":
+          description: 入库成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentIngestResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/documents:
+    post:
+      tags: [documents]
+      summary: 文件入库（multipart，可多文件）
+      description: |
+        支持 `.txt` `.md` `.log` `.pdf` `.docx` `.html` `.csv` `.json`。
+        单文件默认上限 50MB。JSON 可为对象、数组，或 `{ "documents"|"items": [ { "text"|"content"|"body", "metadata" } ] }`。
+      operationId: ingestFiles
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [collection, files]
+              properties:
+                collection:
+                  $ref: "#/components/schemas/CollectionNameString"
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                metadata:
+                  type: string
+                  description: JSON 对象字符串，默认 `{}`
+                  default: "{}"
+                chunk_size:
+                  type: integer
+                  minimum: 33
+                  maximum: 8000
+                chunk_overlap:
+                  type: integer
+                  minimum: 0
+                  maximum: 2000
+      responses:
+        "201":
+          description: 每个文件一条入库结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentIngestListResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/documents/{document_id}:
+    delete:
+      tags: [documents]
+      summary: 按 document_id 删除该文档全部切片
+      operationId: deleteDocument
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: collection
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/CollectionNameString"
+      responses:
+        "200":
+          description: 删除的切片数
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedDocumentResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/retrievals:
+    post:
+      tags: [retrievals]
+      summary: 向量召回（不调用 LLM）
+      operationId: retrieve
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveRequest"
+            example:
+              collection: triage
+              query: 胸口痛还出冷汗该去哪个科
+              top_k: 5
+              score_threshold: 0
+              filters: {}
+              rerank: null
+      responses:
+        "200":
+          description: 召回结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetrieveApiResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/queries:
+    post:
+      tags: [queries]
+      summary: RAG 问答
+      description: |
+        `stream` 为 false 或不传（且服务端 `LLM_STREAM_DEFAULT=false`）时返回 JSON。
+        `stream` 为 true 时返回 SSE `text/event-stream`。
+        需要已配置 LLM，否则 503 `configuration_error`。
+        问诊场景 collection 用 `triage`，服务会额外检索 `shanghai_doctors`。
+      operationId: query
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+            examples:
+              json:
+                summary: 非流式
+                value:
+                  collection: triage
+                  query: 身上起疹子很痒，上海看哪位医生
+                  top_k: 5
+                  stream: false
+                  web_search: true
+                  city: 上海
+              sse:
+                summary: 流式
+                value:
+                  collection: triage
+                  query: 胸口痛出冷汗去哪看
+                  stream: true
+      responses:
+        "200":
+          description: JSON 或 SSE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryApiResponse"
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                frame:
+                  summary: 多帧 SSE
+                  value: |
+                    data: {"type":"meta","collection":"triage","query":"…","city":"上海","reranked":false,"hits":[],"doctor_hits":[],"web_hits":[]}
+
+                    data: {"type":"delta","text":"建议立即急诊"}
+
+                    data: {"type":"done","answer":"建议立即急诊……"}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: 仅当服务端设置了 API_KEY 时需要
+
+  parameters:
+    CollectionName:
+      name: name
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/CollectionNameString"
+
+  responses:
+    Unauthorized:
+      description: API Key 无效或缺失
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Error:
+      description: 统一错误信封
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+  schemas:
+    CollectionNameString:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[A-Za-z][A-Za-z0-9_]{0,63}$"
+      example: triage
+
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - rag_error
+            - unauthorized
+            - not_found
+            - conflict
+            - payload_too_large
+            - validation_error
+            - backend_error
+            - configuration_error
+            - unsupported_type
+            - empty_document
+            - invalid_json
+            - invalid_metadata
+        message:
+          type: string
+
+    ErrorEnvelope:
+      type: object
+      required: [ok, data, error]
+      properties:
+        ok:
+          type: boolean
+          enum: [false]
+        data:
+          nullable: true
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+
+    HealthzResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            status:
+              type: string
+              example: ok
+            service:
+              type: string
+              example: rag-sys
+        error:
+          nullable: true
+
+    ReadyzResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            status:
+              type: string
+              example: ready
+            vector_store:
+              type: string
+              example: local
+            embedding:
+              type: string
+              example: hash
+            llm:
+              type: boolean
+            rerank:
+              type: boolean
+        error:
+          nullable: true
+
+    CollectionCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          $ref: "#/components/schemas/CollectionNameString"
+        dim:
+          type: integer
+          minimum: 1
+          maximum: 32768
+          nullable: true
+          description: 省略则用服务端 EMBEDDING_DIM；首次 embedding 实际维度为准
+        description:
+          type: string
+          default: ""
+
+    CollectionInfo:
+      type: object
+      required: [name, backend, dim]
+      properties:
+        name:
+          type: string
+        backend:
+          type: string
+          example: local
+        dim:
+          type: integer
+        count:
+          type: integer
+          default: 0
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CollectionResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/CollectionInfo"
+        error:
+          nullable: true
+
+    CollectionListResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionInfo"
+        error:
+          nullable: true
+
+    DeletedCollectionResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            deleted:
+              type: string
+        error:
+          nullable: true
+
+    TextIngestRequest:
+      type: object
+      required: [collection, text]
+      properties:
+        collection:
+          $ref: "#/components/schemas/CollectionNameString"
+        text:
+          type: string
+          minLength: 1
+        source:
+          type: string
+          default: inline
+        metadata:
+          type: object
+          additionalProperties: true
+        chunk_size:
+          type: integer
+          minimum: 33
+          maximum: 8000
+          nullable: true
+        chunk_overlap:
+          type: integer
+          minimum: 0
+          maximum: 2000
+          nullable: true
+
+    DocumentIngestResult:
+      type: object
+      required: [collection, document_id, source, chunk_count, dim]
+      properties:
+        collection:
+          type: string
+        document_id:
+          type: string
+          format: uuid
+        source:
+          type: string
+        chunk_count:
+          type: integer
+        dim:
+          type: integer
+
+    DocumentIngestResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/DocumentIngestResult"
+        error:
+          nullable: true
+
+    DocumentIngestListResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentIngestResult"
+        error:
+          nullable: true
+
+    DeletedDocumentResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            document_id:
+              type: string
+            deleted_chunks:
+              type: integer
+        error:
+          nullable: true
+
+    RetrieveHit:
+      type: object
+      required: [id, text, score]
+      properties:
+        id:
+          type: string
+        text:
+          type: string
+        score:
+          type: number
+          format: float
+          description: 余弦相似度，越大越相关；rerank 后为重排分
+        metadata:
+          type: object
+          additionalProperties: true
+
+    RetrieveRequest:
+      type: object
+      required: [collection, query]
+      properties:
+        collection:
+          $ref: "#/components/schemas/CollectionNameString"
+        query:
+          type: string
+          minLength: 1
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 50
+          nullable: true
+        score_threshold:
+          type: number
+          minimum: -1
+          maximum: 1
+          nullable: true
+        filters:
+          type: object
+          additionalProperties: true
+          description: metadata 精确匹配
+        rerank:
+          type: boolean
+          nullable: true
+
+    RetrieveResponse:
+      type: object
+      required: [collection, query, hits]
+      properties:
+        collection:
+          type: string
+        query:
+          type: string
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetrieveHit"
+        reranked:
+          type: boolean
+
+    RetrieveApiResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/RetrieveResponse"
+        error:
+          nullable: true
+
+    QueryRequest:
+      allOf:
+        - $ref: "#/components/schemas/RetrieveRequest"
+        - type: object
+          properties:
+            temperature:
+              type: number
+              minimum: 0
+              maximum: 2
+              nullable: true
+            web_search:
+              type: boolean
+              nullable: true
+              description: 是否联网搜医生；null 表示跟随服务端 WEB_SEARCH_ENABLED
+            city:
+              type: string
+              minLength: 1
+              maxLength: 32
+              nullable: true
+              description: 默认上海
+            stream:
+              type: boolean
+              nullable: true
+              description: true 返回 SSE；false 或省略（且 LLM_STREAM_DEFAULT=false）返回 JSON
+
+    WebSearchHit:
+      type: object
+      required: [title, url]
+      properties:
+        title:
+          type: string
+        url:
+          type: string
+        snippet:
+          type: string
+
+    QueryResponse:
+      type: object
+      required: [collection, query, answer, hits]
+      properties:
+        collection:
+          type: string
+        query:
+          type: string
+        answer:
+          type: string
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetrieveHit"
+        doctor_hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetrieveHit"
+        web_hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebSearchHit"
+        reranked:
+          type: boolean
+        city:
+          type: string
+
+    QueryApiResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/QueryResponse"
+        error:
+          nullable: true
+
+    SseMetaEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [meta]
+        collection:
+          type: string
+        query:
+          type: string
+        city:
+          type: string
+        reranked:
+          type: boolean
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetrieveHit"
+        doctor_hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetrieveHit"
+        web_hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebSearchHit"
+
+    SseDeltaEvent:
+      type: object
+      required: [type, text]
+      properties:
+        type:
+          type: string
+          enum: [delta]
+        text:
+          type: string
+
+    SseDoneEvent:
+      type: object
+      required: [type, answer]
+      properties:
+        type:
+          type: string
+          enum: [done]
+        answer:
+          type: string
+
+    SseErrorEvent:
+      type: object
+      required: [type, code, message]
+      properties:
+        type:
+          type: string
+          enum: [error]
+        code:
+          type: string
+        message:
+          type: string

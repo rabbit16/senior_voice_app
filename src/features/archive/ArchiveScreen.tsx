@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import {text} from '../../shared/i18n/messages';
 import BackButton from '../../shared/components/BackButton';
+import ShareFamilyModal from './ShareFamilyModal';
+import {openDownloadUrl} from '../../services/openDownload';
 import {
   getArchive,
   getHealthReport,
@@ -17,7 +19,10 @@ import {
   listHealthReports,
   listHealthSummaries,
   ocrArchiveImage,
+  shareDocument,
+  exportDocumentPdf,
   type ArchiveRecord,
+  type ShareTargetKind,
   type HealthReportDetail,
   type HealthReportListItem,
   type HealthSummary,
@@ -269,6 +274,8 @@ function isOcrBannerError(message: string): boolean {
     'ocrPickFailed',
     'ocrCameraDenied',
     'ocrImageTooLarge',
+    'ocrNetworkError',
+    'ocrTimeout',
   ].some(key => message === text('zh', key));
 }
 
@@ -279,6 +286,12 @@ function messageForOcrError(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.code === 'image_too_large') {
       return text('zh', 'ocrImageTooLarge');
+    }
+    if (err.code === 'timeout') {
+      return text('zh', 'ocrTimeout');
+    }
+    if (err.code === 'network_error') {
+      return text('zh', 'ocrNetworkError');
     }
     return err.message || text('zh', 'ocrFailed');
   }
@@ -625,6 +638,12 @@ export default function ArchiveScreen() {
   const [savedArchiveId, setSavedArchiveId] = useState<string | null>(null);
   const [hasCachedOcr, setHasCachedOcr] = useState(false);
   const [openedFromCache, setOpenedFromCache] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareTarget, setShareTarget] = useState<{kind: ShareTargetKind; id: string} | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const [shareError, setShareError] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [notice, setNotice] = useState('');
   const recognizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshCachedFlag = useCallback(() => {
@@ -838,6 +857,9 @@ export default function ArchiveScreen() {
     setRecognizeSource(null);
     setSaved(false);
     setSavedArchiveId(null);
+    setNotice('');
+    setShareOpen(false);
+    setShareError('');
     refreshCachedFlag();
     setMode('home');
   }
@@ -1031,6 +1053,93 @@ export default function ArchiveScreen() {
     });
   }
 
+  function openShare(kind: ShareTargetKind, id: string | null) {
+    if (!id) {
+      setError(text('zh', 'shareFailed'));
+      return;
+    }
+    setNotice('');
+    setError('');
+    setShareError('');
+    setShareTarget({kind, id});
+    setShareOpen(true);
+  }
+
+  async function handleShare(contactIds: string[], message: string) {
+    if (!shareTarget) {
+      return;
+    }
+    if (!contactIds.length) {
+      setShareError(text('zh', 'shareNoSelection'));
+      return;
+    }
+    const token = getAccessToken();
+    setSharing(true);
+    setShareError('');
+    try {
+      if (isDemoToken(token)) {
+        setShareOpen(false);
+        setNotice(text('zh', 'shareSuccess'));
+        return;
+      }
+      const result = await shareDocument(token!, shareTarget.kind, shareTarget.id, {
+        contact_ids: contactIds,
+        message: message || undefined,
+        attach_pdf: true,
+      });
+      setShareOpen(false);
+      setNotice(
+        result.failed_count && result.failed_count > 0
+          ? text('zh', 'sharePartial')
+          : text('zh', 'shareSuccess'),
+      );
+    } catch (err) {
+      if (err instanceof ApiError && (err.code === 'empty_contact_ids' || err.code === 'invalid_contact')) {
+        setShareError(err.message || text('zh', 'shareNoSelection'));
+      } else {
+        setShareError(err instanceof ApiError ? err.message : text('zh', 'shareFailed'));
+      }
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  async function handleExportPdf(kind: ShareTargetKind, id: string | null) {
+    if (!id || exporting) {
+      return;
+    }
+    const token = getAccessToken();
+    setError('');
+    setNotice('');
+    if (isDemoToken(token)) {
+      setNotice(text('zh', 'exportDemoOnly'));
+      return;
+    }
+    setExporting(true);
+    try {
+      const result = await exportDocumentPdf(token!, kind, id);
+      const ready = !result.status || result.status === 'ready';
+      if (!ready || !result.download_url) {
+        setError(text('zh', 'exportFailed'));
+        return;
+      }
+      await openDownloadUrl(result.download_url, result.filename);
+      setNotice(text('zh', 'exportSuccess'));
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else if (err instanceof Error && err.name === 'AbortError') {
+        setError(text('zh', 'exportFailed'));
+      } else if (err instanceof Error && err.message) {
+        setError(`${text('zh', 'exportFailed')}（${err.message}）`);
+      } else {
+        setError(text('zh', 'exportFailed'));
+      }
+    } finally {
+      setExporting(false);
+    }
+  }
+
   const {card: recentFromTimeline, usedSummaryId} = buildRecentHomeCard(
     reports,
     visits,
@@ -1114,36 +1223,34 @@ export default function ArchiveScreen() {
             <Text style={styles.savedText}>
               {isDemo ? text('zh', 'savedStatus') : text('zh', 'ocrSavedAuto')}
             </Text>
-            {ocrDraft.document_type === 'visit' ? (
-              <View style={styles.actionRow}>
-                <Pressable
-                  accessibilityRole="button"
-                  disabled={!savedArchiveId}
-                  onPress={() => {
-                    if (isDemo) {
-                      setError('');
-                      return;
-                    }
-                    setError(text('zh', 'shareSoon'));
-                  }}
-                  style={styles.secondaryButtonWide}>
-                  <Text style={styles.secondaryText}>{text('zh', 'pushChildren')}</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  disabled={!savedArchiveId}
-                  onPress={() => {
-                    if (isDemo) {
-                      setError('');
-                      return;
-                    }
-                    setError(text('zh', 'exportSoon'));
-                  }}
-                  style={styles.secondaryButtonWide}>
+            <View style={styles.actionRow}>
+              <Pressable
+                accessibilityRole="button"
+                disabled={!savedArchiveId || sharing || exporting}
+                onPress={() =>
+                  openShare(ocrDraft.document_type === 'exam' ? 'report' : 'visit', savedArchiveId)
+                }
+                style={[styles.secondaryButtonWide, (!savedArchiveId || sharing) && styles.disabledButton]}>
+                <Text style={styles.secondaryText}>{text('zh', 'pushChildren')}</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={!savedArchiveId || exporting}
+                onPress={() =>
+                  handleExportPdf(
+                    ocrDraft.document_type === 'exam' ? 'report' : 'visit',
+                    savedArchiveId,
+                  )
+                }
+                style={[styles.secondaryButtonWide, (!savedArchiveId || exporting) && styles.disabledButton]}>
+                {exporting ? (
+                  <ActivityIndicator color={colors.success} />
+                ) : (
                   <Text style={styles.secondaryText}>{text('zh', 'exportPdf')}</Text>
-                </Pressable>
-              </View>
-            ) : null}
+                )}
+              </Pressable>
+            </View>
+            {notice ? <Text style={styles.savedText}>{notice}</Text> : null}
             <Pressable
               accessibilityRole="button"
               disabled={!savedArchiveId}
@@ -1228,6 +1335,18 @@ export default function ArchiveScreen() {
             {error ? <Text style={styles.errorText}>{error}</Text> : null}
           </View>
         )}
+        <ShareFamilyModal
+          visible={shareOpen}
+          submitting={sharing}
+          error={shareError}
+          onClose={() => {
+            if (!sharing) {
+              setShareOpen(false);
+              setShareError('');
+            }
+          }}
+          onSubmit={handleShare}
+        />
       </ScrollView>
     );
   }
@@ -1336,12 +1455,50 @@ export default function ArchiveScreen() {
                 ))}
               </View>
             )}
+
+            <View style={styles.actionRow}>
+              <Pressable
+                accessibilityRole="button"
+                disabled={!selectedItem || sharing || exporting}
+                onPress={() =>
+                  openShare(isVisit ? 'visit' : 'report', selectedItem?.id || null)
+                }
+                style={[styles.secondaryButtonWide, styles.detailAction, sharing && styles.disabledButton]}>
+                <Text style={styles.secondaryText}>{text('zh', 'pushChildren')}</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={!selectedItem || exporting}
+                onPress={() =>
+                  handleExportPdf(isVisit ? 'visit' : 'report', selectedItem?.id || null)
+                }
+                style={[styles.secondaryButtonWide, styles.detailAction, exporting && styles.disabledButton]}>
+                {exporting ? (
+                  <ActivityIndicator color={colors.success} />
+                ) : (
+                  <Text style={styles.secondaryText}>{text('zh', 'exportPdf')}</Text>
+                )}
+              </Pressable>
+            </View>
+            {notice ? <Text style={styles.savedText}>{notice}</Text> : null}
           </>
         ) : (
           <EmptyBlock label={error || text('zh', 'archiveEmptyDetail')} />
         )}
 
         {error && hasDetail ? <Text style={styles.errorText}>{error}</Text> : null}
+        <ShareFamilyModal
+          visible={shareOpen}
+          submitting={sharing}
+          error={shareError}
+          onClose={() => {
+            if (!sharing) {
+              setShareOpen(false);
+              setShareError('');
+            }
+          }}
+          onSubmit={handleShare}
+        />
       </ScrollView>
     );
   }
@@ -1741,6 +1898,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  detailAction: {
+    backgroundColor: colors.accentSoft,
   },
   disabledButton: {opacity: 0.7},
   savedText: {...typography.bodyStrong, color: colors.success, marginTop: spacing.lg},

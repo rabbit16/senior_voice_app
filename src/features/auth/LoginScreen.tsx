@@ -34,6 +34,7 @@ function createDemoSession(): AuthSession {
     user: {
       id: 'demo_user',
       phone: '13800000000',
+      email: 'demo@qq.com',
       display_name: '演示用户',
       preferred_lang: 'zh',
       created_at: new Date().toISOString(),

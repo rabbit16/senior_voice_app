@@ -145,11 +145,32 @@ export async function deleteArchive(token: string, id: string): Promise<{ok: tru
   });
 }
 
+export type ShareDocumentRequest = {
+  contact_ids: string[];
+  message?: string;
+  attach_pdf?: boolean;
+};
+
+export type ShareDocumentResponse = {
+  ok: true;
+  shared_count: number;
+  failed_count?: number;
+};
+
+export type ExportPdfResponse = {
+  download_url: string;
+  expires_in: number;
+  filename?: string;
+  status?: 'ready' | 'pending' | 'failed';
+};
+
+export type ShareTargetKind = 'visit' | 'report';
+
 export async function shareArchive(
   token: string,
   id: string,
-  body: {contact_ids: string[]; message?: string},
-): Promise<{ok: true; shared_count: number}> {
+  body: ShareDocumentRequest,
+): Promise<ShareDocumentResponse> {
   return apiRequest({
     method: 'POST',
     path: `/archives/${id}/share`,
@@ -158,15 +179,54 @@ export async function shareArchive(
   });
 }
 
-export async function exportArchivePdf(
-  token: string,
-  id: string,
-): Promise<{download_url: string; expires_in: number}> {
+export async function exportArchivePdf(token: string, id: string): Promise<ExportPdfResponse> {
   return apiRequest({
     method: 'GET',
     path: `/archives/${id}/export`,
     token,
+    timeoutMs: Math.max(env.timeoutMs, 60000),
   });
+}
+
+export async function shareHealthReport(
+  token: string,
+  id: string,
+  body: ShareDocumentRequest,
+): Promise<ShareDocumentResponse> {
+  return apiRequest({
+    method: 'POST',
+    path: `/health-reports/${id}/share`,
+    token,
+    body,
+  });
+}
+
+export async function exportHealthReportPdf(token: string, id: string): Promise<ExportPdfResponse> {
+  return apiRequest({
+    method: 'GET',
+    path: `/health-reports/${id}/export`,
+    token,
+    timeoutMs: Math.max(env.timeoutMs, 60000),
+  });
+}
+
+export async function shareDocument(
+  token: string,
+  kind: ShareTargetKind,
+  id: string,
+  body: ShareDocumentRequest,
+): Promise<ShareDocumentResponse> {
+  return kind === 'report'
+    ? shareHealthReport(token, id, body)
+    : shareArchive(token, id, body);
+}
+
+export async function exportDocumentPdf(
+  token: string,
+  kind: ShareTargetKind,
+  id: string,
+): Promise<ExportPdfResponse> {
+  return kind === 'report' ? exportHealthReportPdf(token, id) : exportArchivePdf(token, id);
 }
 
 // ---------------------------------------------------------------------------

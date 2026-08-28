@@ -18,15 +18,19 @@ import {
   askTextStream,
   clearQaContext,
   sanitizeQaSpokenText,
+  type MedicalRecommendation,
   type QaAskDone,
   type QaAskHandlers,
   type QaPhase,
 } from '../../services/qaApi';
+import {buildTriageQuery, requestTriageRecommendation, type DialogueTurn} from '../../services/ragApi';
+import {env} from '../../config/env';
 import {ApiError} from '../../services/http';
 import {getAccessToken} from '../../services/session';
 import {ensureMicPermission, voiceRecorder} from '../../services/voiceRecorder';
 import {moderateScale} from '../../theme/layout';
 import {colors, radius, spacing, typography} from '../../theme/tokens';
+import RecommendationCard from './components/RecommendationCard';
 import ResultCard from './components/ResultCard';
 import VoiceInputButton from './components/VoiceInputButton';
 
@@ -73,15 +77,41 @@ export default function HomeScreen() {
   const [result, setResult] = useState('');
   const [error, setError] = useState('');
   const [showRecommendation, setShowRecommendation] = useState(false);
+  const [recommendation, setRecommendation] = useState<MedicalRecommendation | null>(null);
+  const [recommendationLoading, setRecommendationLoading] = useState(false);
   const [symptomText, setSymptomText] = useState('');
   const [contextId, setContextId] = useState<string | null>(null);
   const [forceNewContext, setForceNewContext] = useState(false);
   const [phase, setPhase] = useState<QaPhase | undefined>(undefined);
   const [intakeComplete, setIntakeComplete] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const recommendAbortRef = useRef<AbortController | null>(null);
   const recordingRef = useRef(false);
   const holdingRef = useRef(false);
   const startingRef = useRef(false);
+  const recommendGenRef = useRef(0);
+  const dialogueRef = useRef<DialogueTurn[]>([]);
+
+  function pushDialogue(role: DialogueTurn['role'], content?: string) {
+    const value = (content || '').trim();
+    if (!value) {
+      return;
+    }
+    const last = dialogueRef.current[dialogueRef.current.length - 1];
+    if (last && last.role === role && last.content === value) {
+      return;
+    }
+    dialogueRef.current.push({role, content: value});
+  }
+
+  function resetRecommendation() {
+    recommendGenRef.current += 1;
+    recommendAbortRef.current?.abort();
+    recommendAbortRef.current = null;
+    setShowRecommendation(false);
+    setRecommendation(null);
+    setRecommendationLoading(false);
+  }
 
   async function requestAndroidMicPermission(): Promise<boolean> {
     const permissionsAndroid =
@@ -126,6 +156,7 @@ export default function HomeScreen() {
   }
 
   function applyAskDone(final: QaAskDone, streamedSpoken: string) {
+    pushDialogue('user', final.question_text);
     setContextId(final.context_id);
     setForceNewContext(false);
     if (final.phase) {
@@ -136,6 +167,7 @@ export default function HomeScreen() {
     );
     const spoken = sanitizeQaSpokenText(final.answer_text) || streamedSpoken;
     if (spoken) {
+      pushDialogue('assistant', spoken);
       setResult(spoken);
     }
     setSymptomText('');
@@ -147,6 +179,7 @@ export default function HomeScreen() {
   }): QaAskHandlers {
     return {
       onMeta: meta => {
+        pushDialogue('user', meta.question_text);
         setContextId(meta.context_id);
         setForceNewContext(false);
         if (state.fromVoice && meta.question_text) {
@@ -192,7 +225,7 @@ export default function HomeScreen() {
     }
 
     setError('');
-    setShowRecommendation(false);
+    resetRecommendation();
 
     try {
       // 若尚未预授权，这里会弹出权限框；松手时 holdingRef=false，授权后自动取消避免卡死
@@ -263,7 +296,7 @@ export default function HomeScreen() {
     abortRef.current = controller;
 
     setError('');
-    setShowRecommendation(false);
+    resetRecommendation();
     setProcessing(true);
     setResult('');
 
@@ -323,7 +356,7 @@ export default function HomeScreen() {
     abortRef.current = controller;
 
     setError('');
-    setShowRecommendation(false);
+    resetRecommendation();
     setProcessing(true);
     setResult('');
 
@@ -363,8 +396,98 @@ export default function HomeScreen() {
     setInputMode('text');
   }
 
+  async function handleMedicalRecommend() {
+    if (recommendationLoading) {
+      return;
+    }
+
+    const sessionId = contextId || '';
+    if (recommendation?.fromRag && recommendation.session_id === sessionId && recommendation.body) {
+      setShowRecommendation(true);
+      setError('');
+      return;
+    }
+
+    const query = buildTriageQuery({
+      turns: dialogueRef.current,
+      diagnosis: result,
+    });
+    if (!query) {
+      setError(text('zh', 'recommendNeedSession'));
+      return;
+    }
+
+    setError('');
+    setShowRecommendation(true);
+    setRecommendation(null);
+    setRecommendationLoading(true);
+    const gen = ++recommendGenRef.current;
+    recommendAbortRef.current?.abort();
+    const controller = new AbortController();
+    recommendAbortRef.current = controller;
+
+    try {
+      let streamed = '';
+      const rag = await requestTriageRecommendation(
+        {query, city: env.ragCity, stream: true},
+        {
+          onDelta: delta => {
+            streamed += delta;
+            if (recommendGenRef.current !== gen || !streamed.trim()) {
+              return;
+            }
+            setRecommendation({
+              session_id: sessionId,
+              title: text('zh', 'recommendationTitle'),
+              department: '',
+              care_hint: '',
+              body: streamed.trim(),
+              risk_level: 'low',
+              disclaimer: text('zh', 'demoNote'),
+              city: env.ragCity,
+              fromRag: true,
+            });
+          },
+        },
+        controller.signal,
+      );
+      if (recommendGenRef.current !== gen) {
+        return;
+      }
+      const body = rag.answer.trim();
+      if (!body) {
+        throw new ApiError(500, {code: 'rag_incomplete', message: text('zh', 'recommendFailed')});
+      }
+      setRecommendation({
+        session_id: sessionId,
+        title: text('zh', 'recommendationTitle'),
+        department: '',
+        care_hint: '',
+        body,
+        risk_level: 'low',
+        disclaimer: text('zh', 'demoNote'),
+        city: rag.city || env.ragCity,
+        fromRag: true,
+      });
+    } catch (err) {
+      if (recommendGenRef.current !== gen) {
+        return;
+      }
+      setRecommendation(null);
+      setShowRecommendation(false);
+      setError(err instanceof ApiError ? err.message : text('zh', 'recommendFailed'));
+    } finally {
+      if (recommendGenRef.current === gen) {
+        setRecommendationLoading(false);
+      }
+      if (recommendAbortRef.current === controller) {
+        recommendAbortRef.current = null;
+      }
+    }
+  }
+
   async function handleNewQuestion() {
-    setShowRecommendation(false);
+    resetRecommendation();
     setResult('');
     setError('');
     setSymptomText('');
@@ -372,6 +495,7 @@ export default function HomeScreen() {
     setContextId(null);
     setPhase(undefined);
     setIntakeComplete(false);
+    dialogueRef.current = [];
     setInputMode('text');
 
     const token = getAccessToken();
@@ -512,7 +636,7 @@ export default function HomeScreen() {
                 {phase === 'diagnosis' || intakeComplete || !phase ? (
                   <Pressable
                     accessibilityRole="button"
-                    onPress={() => setShowRecommendation(true)}
+                    onPress={handleMedicalRecommend}
                     style={styles.primaryAction}>
                     <Text style={styles.primaryActionText}>{text('zh', 'medicalRecommend')}</Text>
                   </Pressable>
@@ -526,10 +650,11 @@ export default function HomeScreen() {
               <Text style={styles.newQuestionText}>{text('zh', 'newQuestion')}</Text>
             </Pressable>
             {showRecommendation && phase !== 'followup' && phase !== 'emergency' ? (
-              <View style={styles.recommendationCard}>
-                <Text style={styles.recommendationTitle}>{text('zh', 'recommendationTitle')}</Text>
-                <Text style={styles.recommendationBody}>{text('zh', 'recommendationBody')}</Text>
-              </View>
+              <RecommendationCard
+                lang="zh"
+                loading={recommendationLoading}
+                recommendation={recommendation}
+              />
             ) : null}
           </>
         ) : !processing ? (
@@ -716,18 +841,5 @@ const styles = StyleSheet.create({
     lineHeight: moderateScale(22),
     fontWeight: '700',
     color: colors.primaryDark,
-  },
-  recommendationCard: {
-    backgroundColor: colors.surfacePurple,
-    borderRadius: radius.lg,
-    padding: spacing.xl,
-    marginTop: spacing.md,
-  },
-  recommendationTitle: {...typography.cardTitle, color: colors.textPrimary, fontSize: moderateScale(20)},
-  recommendationBody: {
-    ...typography.bodyLarge,
-    color: colors.textSecondary,
-    marginTop: spacing.sm,
-    fontSize: moderateScale(16),
   },
 });

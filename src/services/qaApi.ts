@@ -48,13 +48,75 @@ export type QaAnswer = {
   created_at: string;
 };
 
+export type RecommendRiskLevel = 'low' | 'medium' | 'high';
+
+/** RAG shanghai_doctors / 联网结果在卡片上的展示项 */
+export type RecommendDoctor = {
+  id: string;
+  title: string;
+  detail: string;
+  department?: string;
+  url?: string;
+  emergency?: boolean;
+};
+
+export type RecommendWebHit = {
+  title: string;
+  url: string;
+  snippet?: string;
+};
+
+/** POST /qa/sessions/{id}/recommendations 的就医推荐卡片；正文可来自 RAG */
 export type MedicalRecommendation = {
+  id?: string;
   session_id: string;
   title: string;
+  /** 推荐科室，如「呼吸内科或全科」 */
+  department: string;
+  /** 去哪看，如「先去社区医院门诊」 */
+  care_hint: string;
+  /** 给老人读的原因说明 */
   body: string;
-  risk_level: 'low' | 'medium' | 'high';
+  risk_level: RecommendRiskLevel;
   disclaimer: string;
+  created_at?: string;
+  updated_at?: string;
+  city?: string;
+  doctors?: RecommendDoctor[];
+  web_hits?: RecommendWebHit[];
+  /** true 表示正文来自 RAG，不是本地写死文案 */
+  fromRag?: boolean;
 };
+
+export function parseRecommendRiskLevel(value: unknown): RecommendRiskLevel {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (raw === 'medium' || raw === 'high') {
+    return raw;
+  }
+  return 'low';
+}
+
+export function normalizeMedicalRecommendation(
+  raw: Partial<MedicalRecommendation> & Record<string, unknown>,
+  sessionId: string,
+): MedicalRecommendation {
+  const contextId = typeof raw.context_id === 'string' ? raw.context_id : '';
+  return {
+    id: typeof raw.id === 'string' ? raw.id : undefined,
+    session_id:
+      (typeof raw.session_id === 'string' && raw.session_id) || contextId || sessionId,
+    title: String(raw.title || '').trim(),
+    department: String(raw.department || '').trim(),
+    care_hint: String(raw.care_hint || '').trim(),
+    body: String(raw.body || '').trim(),
+    risk_level: parseRecommendRiskLevel(raw.risk_level),
+    disclaimer: String(raw.disclaimer || '').trim(),
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : undefined,
+    updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : undefined,
+  };
+}
 
 type SseEvent = {
   type?: string;
@@ -299,7 +361,7 @@ async function withQaFetchTimeout<T>(
     }
     throw new ApiError(0, {
       code: 'network_error',
-      message: '网络异常，请确认后端已启动',
+      message: `网络异常，连不上 ${env.apiBaseUrl}，请确认内网穿透和后端已启动`,
     });
   } finally {
     clearTimeout(timeout);
@@ -444,13 +506,22 @@ export async function getQaSession(token: string, sessionId: string): Promise<Qa
   });
 }
 
+/**
+ * 基于该次问答会话生成就医推荐。
+ * `{sessionId}` 即 `/qa/ask` 返回的 `context_id`（qa_sessions.id）。
+ * 默认复用已生成结果；传 `force: true` 才重新生成。
+ */
 export async function requestMedicalRecommendation(
   token: string,
   sessionId: string,
+  input?: {force?: boolean},
 ): Promise<MedicalRecommendation> {
-  return apiRequest({
+  const raw = await apiRequest<Partial<MedicalRecommendation> & Record<string, unknown>>({
     method: 'POST',
     path: `/qa/sessions/${sessionId}/recommendations`,
     token,
+    body: input?.force ? {force: true} : undefined,
+    timeoutMs: Math.max(env.timeoutMs, 60000),
   });
+  return normalizeMedicalRecommendation(raw, sessionId);
 }

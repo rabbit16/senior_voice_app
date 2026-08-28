@@ -10,6 +10,7 @@ export type TokenPair = {
 export type UserProfile = {
   id: string;
   phone: string;
+  email?: string | null;
   display_name?: string | null;
   preferred_lang: 'zh' | 'en';
   created_at: string;
@@ -40,9 +41,10 @@ export async function loginWithSms(input: {
   });
 }
 
-/** 注册：手机号 + 验证码 + 密码，可选展示名（对齐 users 表） */
+/** 注册：手机号 + 邮箱 + 验证码 + 密码，可选展示名 */
 export async function registerWithSms(input: {
   phone: string;
+  email: string;
   code: string;
   password: string;
   display_name?: string;
@@ -99,5 +101,17 @@ export async function getMe(token: string): Promise<UserProfile> {
     method: 'GET',
     path: '/me',
     token,
+  });
+}
+
+export async function updateMe(
+  token: string,
+  body: {email?: string; display_name?: string | null},
+): Promise<UserProfile> {
+  return apiRequest({
+    method: 'PATCH',
+    path: '/me',
+    token,
+    body,
   });
 }

@@ -31,6 +31,7 @@ from pathlib import Path
 
 data = json.loads(Path("config/api.json").read_text(encoding="utf-8"))
 print(f"[INFO] Using API base URL: {data.get('apiBaseUrl')}")
+print(f"[INFO] Using RAG base URL: {data.get('ragBaseUrl') or '(same as API)'}")
 PY
 fi
 
@@ -65,6 +66,8 @@ p.write_text(s)
 PY
 
 echo "[INFO] Building Android Release APK..."
+# api.json 变更时 Gradle 可能复用旧 JS 包，导致手机仍打到主后端从而 404
+rm -rf "$PROJECT_DIR/android/app/build/generated/assets/react"
 cd android
 ./gradlew assembleRelease
 
