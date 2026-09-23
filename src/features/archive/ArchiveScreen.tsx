@@ -33,6 +33,7 @@ import {ApiError} from '../../services/http';
 import {loadLastOcrCache, saveLastOcrCache} from '../../services/ocrCache';
 import {isImagePickCancelled, pickImage} from '../../services/pickImage';
 import {getAccessToken, getSession} from '../../services/session';
+import {listFamilyParents, type FamilyParent} from '../../services/profileApi';
 import {colors, radius, spacing, typography} from '../../theme/tokens';
 
 type ViewMode = 'home' | 'reports' | 'detail' | 'confirm';
@@ -122,6 +123,8 @@ type TimelineItem = {
   subtitle: string;
   voucherLabel: string;
   voucherNo: string;
+  patientName?: string;
+  ownerRelation?: string;
 };
 
 function toTimelineItem(
@@ -147,39 +150,57 @@ function toTimelineItem(
   };
 }
 
-function reportToTimelineItem(report: HealthReportListItem): TimelineItem {
-  return toTimelineItem(
-    'report',
-    report.id,
-    report.exam_date,
-    report.report_type || text('zh', 'healthArchiveReport'),
-    report.patient_name,
-    report.org_name,
-    text('zh', 'examVoucherLabel'),
-    report.voucher_no,
-  );
+function reportToTimelineItem(
+  report: HealthReportListItem,
+  patientName?: string,
+  ownerRelation?: string,
+): TimelineItem {
+  return {
+    ...toTimelineItem(
+      'report',
+      report.id,
+      report.exam_date,
+      report.report_type || text('zh', 'healthArchiveReport'),
+      report.patient_name,
+      report.org_name,
+      text('zh', 'examVoucherLabel'),
+      report.voucher_no,
+    ),
+    patientName: patientName || report.patient_name || undefined,
+    ownerRelation,
+  };
 }
 
-function visitToTimelineItem(visit: ArchiveRecord): TimelineItem {
-  return toTimelineItem(
-    'visit',
-    visit.id,
-    visit.visit_date,
-    text('zh', 'visitTypeBadge'),
-    visit.diagnosis,
-    visit.medicine,
-    text('zh', 'visitNoLabel'),
-    visit.visit_no,
-  );
+function visitToTimelineItem(
+  visit: ArchiveRecord,
+  patientName?: string,
+  ownerRelation?: string,
+): TimelineItem {
+  return {
+    ...toTimelineItem(
+      'visit',
+      visit.id,
+      visit.visit_date,
+      text('zh', 'visitTypeBadge'),
+      visit.diagnosis,
+      visit.medicine,
+      text('zh', 'visitNoLabel'),
+      visit.visit_no,
+    ),
+    patientName: patientName || undefined,
+    ownerRelation,
+  };
 }
 
 function mergeTimeline(
   reports: HealthReportListItem[],
   visits: ArchiveRecord[],
+  patientName?: string,
+  ownerRelation?: string,
 ): TimelineItem[] {
   const items = [
-    ...reports.map(reportToTimelineItem),
-    ...visits.map(visitToTimelineItem),
+    ...reports.map(report => reportToTimelineItem(report, patientName, ownerRelation)),
+    ...visits.map(visit => visitToTimelineItem(visit, patientName, ownerRelation)),
   ];
   items.sort((a, b) => {
     const byDate = formatDate(b.date).localeCompare(formatDate(a.date));
@@ -614,8 +635,18 @@ const DEMO_ARCHIVES: ArchiveRecord[] = [
   },
 ];
 
-export default function ArchiveScreen() {
-  const [mode, setMode] = useState<ViewMode>('home');
+type ArchiveScreenProps = {
+  familyViewOnly?: boolean;
+  initialParentId?: string;
+  familyLookupFailed?: boolean;
+};
+
+export default function ArchiveScreen({
+  familyViewOnly = false,
+  initialParentId,
+  familyLookupFailed = false,
+}: ArchiveScreenProps) {
+  const [mode, setMode] = useState<ViewMode>(familyViewOnly ? 'reports' : 'home');
   const [summaries, setSummaries] = useState<HealthSummary[]>([]);
   const [reports, setReports] = useState<HealthReportListItem[]>([]);
   const [visits, setVisits] = useState<ArchiveRecord[]>([]);
@@ -629,6 +660,8 @@ export default function ArchiveScreen() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState('');
   const [demoMode, setDemoMode] = useState(false);
+  const [familyParents, setFamilyParents] = useState<FamilyParent[]>([]);
+  const [selectedParentId, setSelectedParentId] = useState<string | null>(initialParentId || null);
 
   const [recognizing, setRecognizing] = useState(false);
   const [ocrDraft, setOcrDraft] = useState<OcrDraft>(emptyDraft());
@@ -693,8 +726,29 @@ export default function ArchiveScreen() {
   }, [refreshCachedFlag, mode]);
 
   const loadHome = useCallback(async () => {
+    if (familyViewOnly && (!initialParentId || familyLookupFailed)) {
+      setSummaries([]);
+      setReports([]);
+      setVisits([]);
+      setError(
+        familyLookupFailed
+          ? text('zh', 'familyParentsLoadFailed')
+          : text('zh', 'familyParentsEmpty'),
+      );
+      setHomeLoading(false);
+      return;
+    }
     const token = getAccessToken();
     if (isDemoToken(token)) {
+      if (familyViewOnly) {
+        setDemoMode(false);
+        setSummaries([]);
+        setReports([]);
+        setVisits([]);
+        setError(text('zh', 'archiveNeedLogin'));
+        setHomeLoading(false);
+        return;
+      }
       setDemoMode(true);
       setSummaries(DEMO_SUMMARIES);
       setReports(DEMO_REPORTS);
@@ -709,9 +763,17 @@ export default function ArchiveScreen() {
     setError('');
     try {
       const [summaryResult, reportResult, archiveResult] = await Promise.allSettled([
-        listHealthSummaries(token!),
-        listHealthReports(token!, {page: 1, page_size: 100}),
-        listArchives(token!, {page: 1, page_size: 100}),
+        listHealthSummaries(token!, familyViewOnly ? initialParentId : undefined),
+        listHealthReports(token!, {
+          page: 1,
+          page_size: 100,
+          ...(familyViewOnly && initialParentId ? {owner_user_id: initialParentId} : {}),
+        }),
+        listArchives(token!, {
+          page: 1,
+          page_size: 100,
+          ...(familyViewOnly && initialParentId ? {owner_user_id: initialParentId} : {}),
+        }),
       ]);
       const summaryItems =
         summaryResult.status === 'fulfilled' ? summaryResult.value.items || [] : [];
@@ -740,11 +802,30 @@ export default function ArchiveScreen() {
     } finally {
       setHomeLoading(false);
     }
-  }, []);
+  }, [familyLookupFailed, familyViewOnly, initialParentId]);
 
-  const loadReports = useCallback(async () => {
+  const loadReports = useCallback(async (ownerUserId: string | null = selectedParentId) => {
+    if (familyViewOnly && (!ownerUserId || familyLookupFailed)) {
+      setReports([]);
+      setVisits([]);
+      setError(
+        familyLookupFailed
+          ? text('zh', 'familyParentsLoadFailed')
+          : text('zh', 'familyParentsEmpty'),
+      );
+      setReportsLoading(false);
+      return;
+    }
     const token = getAccessToken();
     if (isDemoToken(token)) {
+      if (familyViewOnly) {
+        setDemoMode(false);
+        setReports([]);
+        setVisits([]);
+        setError(text('zh', 'archiveNeedLogin'));
+        setReportsLoading(false);
+        return;
+      }
       setDemoMode(true);
       setReports(DEMO_REPORTS);
       setVisits(prev => (prev.length ? prev : DEMO_ARCHIVES));
@@ -758,8 +839,16 @@ export default function ArchiveScreen() {
     setError('');
     try {
       const [reportResult, archiveResult] = await Promise.allSettled([
-        listHealthReports(token!, {page: 1, page_size: 100}),
-        listArchives(token!, {page: 1, page_size: 100}),
+        listHealthReports(token!, {
+          page: 1,
+          page_size: 100,
+          ...(ownerUserId ? {owner_user_id: ownerUserId} : {}),
+        }),
+        listArchives(token!, {
+          page: 1,
+          page_size: 100,
+          ...(ownerUserId ? {owner_user_id: ownerUserId} : {}),
+        }),
       ]);
       const reportItems =
         reportResult.status === 'fulfilled' ? reportResult.value.items || [] : [];
@@ -780,7 +869,41 @@ export default function ArchiveScreen() {
     } finally {
       setReportsLoading(false);
     }
-  }, []);
+  }, [familyLookupFailed, familyViewOnly, selectedParentId]);
+
+  const loadFamilyParentOptions = useCallback(async () => {
+    if (familyLookupFailed) {
+      setFamilyParents([]);
+      setError(text('zh', 'familyParentsLoadFailed'));
+      return;
+    }
+    const token = getAccessToken();
+    if (isDemoToken(token)) {
+      setFamilyParents([]);
+      if (familyViewOnly) {
+        setError(text('zh', 'archiveNeedLogin'));
+      }
+      return;
+    }
+    try {
+      const result = await listFamilyParents(token!);
+      const parents = result.items || [];
+      setFamilyParents(parents);
+      if (familyViewOnly && !parents.length) {
+        setError(text('zh', 'familyParentsEmpty'));
+      }
+      if (!familyViewOnly) {
+        setSelectedParentId(current =>
+          current && !parents.some(parent => parent.id === current) ? null : current,
+        );
+      }
+    } catch {
+      setFamilyParents([]);
+      if (familyViewOnly) {
+        setError(text('zh', 'familyParentsLoadFailed'));
+      }
+    }
+  }, [familyLookupFailed, familyViewOnly]);
 
   const loadTimelineDetail = useCallback(async (item: SelectedItem) => {
     const token = getAccessToken();
@@ -830,6 +953,18 @@ export default function ArchiveScreen() {
   useEffect(() => {
     loadHome();
   }, [loadHome]);
+
+  useEffect(() => {
+    if (familyViewOnly) {
+      loadFamilyParentOptions();
+    }
+  }, [familyViewOnly, loadFamilyParentOptions]);
+
+  useEffect(() => {
+    if (!familyViewOnly && mode === 'reports') {
+      loadFamilyParentOptions();
+    }
+  }, [familyViewOnly, mode, loadFamilyParentOptions]);
 
   useEffect(() => {
     if (mode === 'reports') {
@@ -1456,31 +1591,35 @@ export default function ArchiveScreen() {
               </View>
             )}
 
-            <View style={styles.actionRow}>
-              <Pressable
-                accessibilityRole="button"
-                disabled={!selectedItem || sharing || exporting}
-                onPress={() =>
-                  openShare(isVisit ? 'visit' : 'report', selectedItem?.id || null)
-                }
-                style={[styles.secondaryButtonWide, styles.detailAction, sharing && styles.disabledButton]}>
-                <Text style={styles.secondaryText}>{text('zh', 'pushChildren')}</Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                disabled={!selectedItem || exporting}
-                onPress={() =>
-                  handleExportPdf(isVisit ? 'visit' : 'report', selectedItem?.id || null)
-                }
-                style={[styles.secondaryButtonWide, styles.detailAction, exporting && styles.disabledButton]}>
-                {exporting ? (
-                  <ActivityIndicator color={colors.success} />
-                ) : (
-                  <Text style={styles.secondaryText}>{text('zh', 'exportPdf')}</Text>
-                )}
-              </Pressable>
-            </View>
-            {notice ? <Text style={styles.savedText}>{notice}</Text> : null}
+            {selectedParentId ? null : (
+              <>
+                <View style={styles.actionRow}>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={!selectedItem || sharing || exporting}
+                    onPress={() =>
+                      openShare(isVisit ? 'visit' : 'report', selectedItem?.id || null)
+                    }
+                    style={[styles.secondaryButtonWide, styles.detailAction, sharing && styles.disabledButton]}>
+                    <Text style={styles.secondaryText}>{text('zh', 'pushChildren')}</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={!selectedItem || exporting}
+                    onPress={() =>
+                      handleExportPdf(isVisit ? 'visit' : 'report', selectedItem?.id || null)
+                    }
+                    style={[styles.secondaryButtonWide, styles.detailAction, exporting && styles.disabledButton]}>
+                    {exporting ? (
+                      <ActivityIndicator color={colors.success} />
+                    ) : (
+                      <Text style={styles.secondaryText}>{text('zh', 'exportPdf')}</Text>
+                    )}
+                  </Pressable>
+                </View>
+                {notice ? <Text style={styles.savedText}>{notice}</Text> : null}
+              </>
+            )}
           </>
         ) : (
           <EmptyBlock label={error || text('zh', 'archiveEmptyDetail')} />
@@ -1504,12 +1643,54 @@ export default function ArchiveScreen() {
   }
 
   if (mode === 'reports') {
-    const timeline = mergeTimeline(reports, visits);
+    const viewedParent = familyParents.find(parent => parent.id === selectedParentId);
+    const timeline = mergeTimeline(
+      reports,
+      visits,
+      familyViewOnly ? viewedParent?.display_name || viewedParent?.phone : undefined,
+      familyViewOnly ? viewedParent?.relation : undefined,
+    );
     return (
       <ScrollView style={styles.page} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <BackButton label={text('zh', 'backToArchive')} onPress={() => setMode('home')} />
+        {familyViewOnly ? null : (
+          <BackButton label={text('zh', 'backToArchive')} onPress={() => setMode('home')} />
+        )}
         <Text style={styles.title}>{text('zh', 'healthArchiveReport')}</Text>
         <Text style={styles.subtitle}>{text('zh', 'reportListSubtitle')}</Text>
+
+        {familyParents.length ? (
+          <View style={styles.parentSelector}>
+            <Text style={styles.parentSelectorLabel}>{text('zh', 'viewingParent')}</Text>
+            <View style={styles.parentSelectorOptions}>
+              {!familyViewOnly ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{selected: selectedParentId === null}}
+                  onPress={() => setSelectedParentId(null)}
+                  style={[styles.parentChip, selectedParentId === null && styles.parentChipActive]}>
+                  <Text style={[styles.parentChipText, selectedParentId === null && styles.parentChipTextActive]}>
+                    {text('zh', 'myReports')}
+                  </Text>
+                </Pressable>
+              ) : null}
+              {familyParents.filter(parent => !familyViewOnly || parent.id === initialParentId).map(parent => {
+                const active = selectedParentId === parent.id;
+                return (
+                  <Pressable
+                    key={parent.id}
+                    accessibilityRole="button"
+                    accessibilityState={{selected: active}}
+                    onPress={() => setSelectedParentId(parent.id)}
+                    style={[styles.parentChip, active && styles.parentChipActive]}>
+                    <Text style={[styles.parentChipText, active && styles.parentChipTextActive]}>
+                      {parent.display_name || parent.phone}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
 
         {reportsLoading ? (
           <LoadingBlock label={text('zh', 'archiveLoading')} />
@@ -1551,6 +1732,14 @@ export default function ArchiveScreen() {
                         <Text style={styles.reportBadgeText}>{item.badge}</Text>
                       </View>
                       <Text style={styles.reportName}>{item.title}</Text>
+                      {item.patientName || item.ownerRelation ? (
+                        <Text style={styles.reportOwner}>
+                          {item.ownerRelation
+                            ? `${text('zh', 'reportYouAreRelation')}${text('zh', item.ownerRelation).replace(/\s.+$/, '')}，`
+                            : ''}
+                          {item.patientName ? `${text('zh', 'reportBelongsTo')}${item.patientName}` : ''}
+                        </Text>
+                      ) : null}
                       <View style={styles.reportOrgRow}>
                         <View style={styles.orgIcon} />
                         <Text style={styles.reportOrg}>{item.subtitle}</Text>
@@ -1648,12 +1837,14 @@ export default function ArchiveScreen() {
         <Text style={styles.errorText}>{error}</Text>
       ) : null}
 
-      <Pressable
-        accessibilityRole="button"
-        onPress={() => setMode('reports')}
-        style={styles.reportButton}>
-        <Text style={styles.reportButtonText}>{text('zh', 'healthArchiveReport')}</Text>
-      </Pressable>
+        {!familyViewOnly ? (
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setMode('reports')}
+            style={styles.reportButton}>
+            <Text style={styles.reportButtonText}>{text('zh', 'healthArchiveReport')}</Text>
+          </Pressable>
+        ) : null}
     </ScrollView>
   );
 }
@@ -1928,6 +2119,24 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
     textAlign: 'center',
   },
+  parentSelector: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  parentSelectorLabel: {...typography.bodyStrong, color: colors.textPrimary, marginBottom: spacing.sm},
+  parentSelectorOptions: {flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm},
+  parentChip: {
+    minHeight: 42,
+    justifyContent: 'center',
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.backgroundWarm,
+  },
+  parentChipActive: {backgroundColor: colors.primary},
+  parentChipText: {...typography.bodyStrong, color: colors.primaryDark},
+  parentChipTextActive: {color: colors.surface},
   reportList: {marginTop: spacing.sm},
   reportItem: {
     flexDirection: 'row',
@@ -1996,6 +2205,7 @@ const styles = StyleSheet.create({
   },
   reportBadgeText: {...typography.label, color: colors.surface},
   reportName: {...typography.cardTitle, color: colors.textPrimary, paddingRight: 88},
+  reportOwner: {...typography.label, color: colors.primaryDark, marginTop: spacing.xs, fontWeight: '600'},
   reportOrgRow: {
     flexDirection: 'row',
     alignItems: 'center',

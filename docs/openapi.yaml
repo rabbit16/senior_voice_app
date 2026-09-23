@@ -326,6 +326,9 @@ paths:
       description: |
         按 updated_at 倒序返回当前用户总结；每条带 items（sort_order 升序）。
         列表为空返回 items=[]，不要 404。
+        子女可传 owner_user_id 查看已授权父母的总结；服务端须实时校验有效家庭关联。
+      parameters:
+        - $ref: '#/components/parameters/OwnerUserId'
       responses:
         '200':
           description: 总结列表
@@ -342,7 +345,9 @@ paths:
         只返回体检。前端会与 GET /archives 合并后按日期倒序画时间轴。
         不要返回 findings / full_text / glossary。
         ORDER BY exam_date DESC, created_at DESC。
+        子女可传 owner_user_id 查看已授权父母报告；服务端须实时校验有效家庭关联。
       parameters:
+        - $ref: '#/components/parameters/OwnerUserId'
         - name: page
           in: query
           schema:
@@ -373,6 +378,7 @@ paths:
         findings 按 sort_order 升序。
         full_text 从 health_reports.raw_payload.full_text 取出，没有则 null。
         glossary 请内嵌返回（report_glossaries，enabled=1）。
+        允许记录所属用户为当前用户，或其已授权父母；服务端按记录真实 owner 校验有效家庭关系。无权限统一 404。
       parameters:
         - $ref: '#/components/parameters/ReportId'
       responses:
@@ -477,7 +483,9 @@ paths:
         卡片使用 diagnosis / medicine / visit_date / visit_no。
         ORDER BY visit_date DESC, created_at DESC。
         q 前端展示页不传，可暂缓。
+        子女可传 owner_user_id 查看已授权父母档案；服务端须实时校验有效家庭关联。
       parameters:
+        - $ref: '#/components/parameters/OwnerUserId'
         - name: q
           in: query
           schema:
@@ -524,7 +532,9 @@ paths:
     get:
       tags: [archives]
       summary: 就诊单详情
-      description: 完整报告 Tab 使用 raw_ocr_text；校验所属用户。
+      description: |
+        完整报告 Tab 使用 raw_ocr_text。
+        允许记录所属用户为当前用户，或其已授权父母；服务端按记录真实 owner 校验有效家庭关系。无权限统一 404。
       parameters:
         - $ref: '#/components/parameters/ArchiveId'
       responses:
@@ -600,6 +610,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ExportPdfResponse'
+
+  /family/parents:
+    get:
+      tags: [family]
+      summary: 当前子女有权查看的父母列表
+      description: |
+        仅返回已登录账号手机号与父母未删除联系人手机号匹配，且联系人关系为 daughter/son 的父母账号。
+        关系改为 other、联系人改号或删除后立即撤销授权。只用于切换报告归属，不授予写权限。
+        空列表返回 items=[]。
+      responses:
+        '200':
+          description: 已授权父母列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FamilyParentList'
+        '401':
+          $ref: '#/components/responses/Error'
 
   /family/contacts:
     get:
@@ -714,6 +742,15 @@ components:
       name: report_id
       in: path
       required: true
+      schema:
+        type: string
+    OwnerUserId:
+      name: owner_user_id
+      in: query
+      required: false
+      description: |
+        可选报告归属用户 ID。省略时默认为当前登录用户；仅已授权子女可指定父母 user_id。
+        服务端须校验家庭关联；无权访问或目标不可见时返回 404。
       schema:
         type: string
     ContactId:
@@ -1355,6 +1392,32 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/FamilyContact'
+
+    FamilyParent:
+      type: object
+      required: [id, display_name, phone, relation]
+      properties:
+        id:
+          type: string
+          description: 父母用户 ID，可作为 owner_user_id
+        display_name:
+          type: string
+          nullable: true
+        phone:
+          type: string
+          description: 脱敏后的父母手机号
+        relation:
+          type: string
+          enum: [daughter, son]
+
+    FamilyParentList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FamilyParent'
 
     CreateFamilyContactRequest:
       type: object

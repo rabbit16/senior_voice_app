@@ -215,7 +215,7 @@ Content-Type: application/json
 
 ## 8. 问答（流式 SSE）
 
-同一 URL，`"stream": true`。响应 `Content-Type: text/event-stream`。
+同一 URL，`"stream": true`。响应 `Content-Type: text/event-stream`。服务端需在检索完成后尽快发送 `meta`，模型生成的每个增量立即发送 `delta` 并 flush；不要等全文生成完再转成 SSE。设置 `Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`，关闭 gzip/代理缓冲。
 
 客户端必须：
 

@@ -1,10 +1,10 @@
 {
-  "apiBaseUrl": "http://na66c424.natappfree.cc",
+  "apiBaseUrl": "http://127.0.0.1:8000",
   "apiPrefix": "/api/v1",
   "timeoutMs": 60000,
-  "ragPort": "",
-  "ragBaseUrl": "http://w9a99a59.natappfree.cc",
-  "ragApiKey": "",
+  "ragPort": 8001,
+  "ragBaseUrl": "http://127.0.0.1:8001",
+  "ragApiKey": "17511684584",
   "ragCity": "上海",
-  "comment": "主后端 na66c424，RAG w9a99a59。ragApiKey 仅当 RAG 服务开了 HTTP API_KEY 才填，模型密钥不要放进 App。"
+  "comment": "配置说明（JSON 不支持 // 注释，故用此字段记录）：主后端地址由 apiBaseUrl 设置，接口前缀由 apiPrefix 设置；RAG 问诊接口为 POST {RAG根地址}/api/v1/queries。当前主后端和 RAG 在同一台电脑，主后端端口 8000、RAG 端口 8001，因此 ragBaseUrl 留空，让程序使用 apiBaseUrl 的主机名并将端口替换为 ragPort。若填写非空 ragBaseUrl，它会优先于 ragPort，必须填完整根地址（例如 http://127.0.0.1:8001），不要漏掉 :8001，也不要在地址末尾加 /api/v1。只有 RAG 服务配置了 HTTP API_KEY 时才填写 ragApiKey，否则留空；这里不是 OpenAI/模型密钥，不要填写手机号或模型密钥。此处 127.0.0.1 仅适用于在运行前端和后端的同一台电脑上使用浏览器；手机 APK 中应改为手机可访问的电脑局域网 IP 或公网穿透地址，并重新打包。修改后重启 npm run web；APK 配置改动后重新打包。"
 }

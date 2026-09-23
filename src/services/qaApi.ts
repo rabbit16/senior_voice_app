@@ -187,13 +187,14 @@ function toQaAskDone(event: SseEvent): QaAskDone | null {
 }
 
 function parseSseChunk(buffer: string): {events: SseEvent[]; rest: string} {
-  const parts = buffer.split(/\n\n/);
+  // SSE 可以使用 LF 或 CRLF；只按 LF 拆会把 CRLF 的所有 token 留到流结束才显示。
+  const parts = buffer.split(/\r?\n\r?\n/);
   const rest = parts.pop() ?? '';
   const events: SseEvent[] = [];
 
   for (const part of parts) {
     const dataLines = part
-      .split(/\n/)
+      .split(/\r?\n/)
       .filter(line => line.startsWith('data:'))
       .map(line => line.slice(5).trimStart());
     if (!dataLines.length) {
@@ -308,6 +309,7 @@ async function consumeQaSseResponse(
     while (true) {
       const {done: ended, value} = await reader.read();
       if (ended) {
+        buffer += decoder.decode();
         break;
       }
       buffer += decoder.decode(value, {stream: true});

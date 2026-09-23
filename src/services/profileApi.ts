@@ -6,6 +6,13 @@ export type UserPreferences = {
 
 export type FamilyRelation = 'daughter' | 'son' | 'other';
 
+export type FamilyParent = {
+  id: string;
+  display_name: string | null;
+  phone: string;
+  relation: 'daughter' | 'son';
+};
+
 export type FamilyContact = {
   id: string;
   name: string;
@@ -102,6 +109,14 @@ export async function listFamilyContacts(token: string): Promise<{items: FamilyC
   return apiRequest({
     method: 'GET',
     path: '/family/contacts',
+    token,
+  });
+}
+
+export async function listFamilyParents(token: string): Promise<{items: FamilyParent[]}> {
+  return apiRequest({
+    method: 'GET',
+    path: '/family/parents',
     token,
   });
 }

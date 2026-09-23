@@ -243,6 +243,8 @@ Authorization: Bearer <access_token>
 
 初步判断出现后，首页会显示「就医推荐」按钮，调用 `POST /qa/sessions/{session_id}/recommendations`。路径里的 `{session_id}` **就是** `/qa/ask` 的 `context_id`（`qa_sessions.id`）。
 
+`/qa/ask`、`/qa/ask/audio` 为实时 SSE：必须尽早发送 `meta`，收到模型片段就逐个发送 `token`，每帧后 flush，不得先收齐模型全文再发送；响应设置 `Content-Type: text/event-stream`、`Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`，关闭 gzip/反向代理缓冲，连接保持 HTTP 流式透传。首个事件应在问诊/模型启动时立即返回，不要等 LLM 全文生成后发 `meta`。
+
 #### `POST /qa/ask`（需登录）——文字输入（SSE 流式）
 
 `Content-Type: text/event-stream`
@@ -459,9 +461,9 @@ data: {"type":"done","context_id":"...","lang":"zh","question_text":"我有点�
 
 | 页面 | 接口 |
 |------|------|
-| 档案首页总结卡片 | `GET /health-summaries` |
-| 时间轴 · 体检 | `GET /health-reports?page=1&page_size=100` |
-| 时间轴 · 就诊 | `GET /archives?page=1&page_size=100` |
+| 档案首页总结卡片 | `GET /health-summaries`（查看父母时附 `owner_user_id`） |
+| 时间轴 · 体检 | `GET /health-reports?page=1&page_size=100`（查看父母时附 `owner_user_id`） |
+| 时间轴 · 就诊 | `GET /archives?page=1&page_size=100`（查看父母时附 `owner_user_id`） |
 | 详情 · 体检 | `GET /health-reports/{id}` |
 | 详情 · 就诊 | `GET /archives/{id}` |
 
@@ -995,11 +997,55 @@ PDF 内容最低要求（体检）：姓名、机构、检查号、日期、异�
 
 #### `DELETE /family/contacts/{id}`（需登录）
 
-软删除：`deleted_at` 置值。响应 `{ "ok": true }`。
+软删除：`deleted_at` 置值。响应 `{ "ok": true }`。如果联系人已关联子女账号，删除后立即撤销该子女查看父母报告的权限。
 
 ---
 
-### 2.5.2 推送权限与异常指标
+### 2.5.2 子女查看父母报告（只读授权）
+
+目标：老人添加家属联系人并将关系设置为 `daughter` 或 `son` 后，若该联系人的手机号已注册 App 账号，子女登录后可在报告页选择父母，查看父母的健康总结、体检报告和就诊单时间轴及详情。列表/详情字段、时间轴排序和报告格式沿用老人本人报告，不复制或迁移数据。
+
+**授权规则（服务端强制，不能由客户端自行判定）：**
+
+建议直接从未删除的 `family_contacts` 关系和双方规范化手机号实时计算授权，无需另建容易与联系人状态不一致的权限表；如采用缓存/独立授权记录，更新联系人或删除时必须在同一事务内同步撤销。
+
+1. 仅当父母账号 `family_contacts` 中存在未删除联系人，且 `relation` 为 `daughter` / `son`、联系人手机号与已登录子女账号手机号规范化后完全一致时，建立有效授权。添加联系人本身即代表老人授予该子女只读查看报告的权限。
+2. 联系人暂未注册时，仍可先保留这条家属关系；子女注册/登录后按手机号匹配即可生效，无需老人重复添加。
+3. 父母将关系改为 `other`、删除联系人，或手机号改为不匹配值时，立即撤销关联。所有跨账号读请求均需实时校验有效关联（或使用保证即时撤销的授权记录）；旧 JWT 不得延续已撤销的权限。
+4. `GET /family/parents` 只返回当前登录子女有权查看的父母账号。返回的 `id` 是父母 `user_id`，用于后续请求的 `owner_user_id`。
+5. 跨账号范围仅包括 `GET /health-summaries`、`GET /health-reports`、`GET /archives` 和对应的报告/就诊详情 GET。`POST/PATCH/DELETE`、OCR、分享、导出、问答和个人资料仍只能操作登录者本人；不得因家庭关联扩大写权限。
+6. 未授权的父母、资源不存在或不属于该父母时，统一返回 `404`，避免通过响应探测账号或报告是否存在。未登录仍返回 `401`。
+
+#### `GET /family/parents`（需登录，子女账号）
+
+获取当前账号有权查看的父母列表。空列表返回 `{ "items": [] }`。按授权联系人创建时间排序；手机号应脱敏展示。
+
+```json
+{
+  "items": [
+    {
+      "id": "usr_parent_1",
+      "display_name": "王阿姨",
+      "phone": "138****8000",
+      "relation": "daughter"
+    }
+  ]
+}
+```
+
+#### 家庭报告列表参数
+
+子女先选定 `GET /family/parents` 返回的父母，再在下列接口传 `owner_user_id`。老人本人调用时不传，默认当前用户。服务端必须验证 `owner_user_id` 与当前用户间存在上述有效关系；分页、排序和响应格式均与本人查询完全一致。
+
+- `GET /health-summaries?owner_user_id=usr_parent_1`
+- `GET /health-reports?owner_user_id=usr_parent_1&page=1&page_size=100`
+- `GET /archives?owner_user_id=usr_parent_1&page=1&page_size=100`
+
+访问详情时仍使用现有详情路由（`GET /health-reports/{report_id}`、`GET /archives/{archive_id}`）。服务端先定位记录所属 `user_id`，再确认它是本人或 `owner_user_id` 授权范围内的记录；详情响应格式不变。详情路由不接受客户端传入的 owner 覆盖资源真实所属人。
+
+---
+
+### 2.5.3 推送权限与异常指标
 
 对应表：`family_push_rules`，与用户 1:1。没有行时 **GET 返回默认值并建行**：
 
@@ -1061,7 +1107,7 @@ PDF 内容最低要求（体检）：姓名、机构、检查号、日期、异�
 
 ---
 
-### 2.5.3 后端本轮必做（给实现者）
+### 2.5.4 后端本轮必做（给实现者）
 
 前端已接好。后端按下面清单即可联调：
 
@@ -1072,7 +1118,8 @@ PDF 内容最低要求（体检）：姓名、机构、检查号、日期、异�
 5. **自动推送**（可与 3 同套发信）：保存就诊单看 `on_record_saved`；体检 findings 看 `on_abnormal` + 指标；复查语义看 `on_visit`。只发给 `notify_enabled=true` 且有 `email` 的人
 6. **账号邮箱**：注册 `POST /auth/register` 必填 `email`；个人中心 `PATCH /me` 可改。存 `users.email`
 7. 表结构以 [`docs/database/schema.sql`](./database/schema.sql) 为准。若库已建过，请 `ALTER` 增加 `users.email` / `family_contacts.email`（及对应生成列、唯一键），不要只改代码。
-8. OpenAPI：[`docs/openapi.yaml`](./openapi.yaml)
+8. **子女只读查看父母报告**：手机号精确关联 + 家庭关系为儿子/女儿；实现 `GET /family/parents`，并为健康总结、体检列表和就诊列表支持可选 `owner_user_id`。详情 GET 根据记录真实 owner 做授权校验；授权撤销后即时失效。不得放开写接口。
+9. OpenAPI：[`docs/openapi.yaml`](./openapi.yaml)
 
 发信（QQ 邮箱 SMTP）环境变量建议：
 
@@ -1164,6 +1211,7 @@ docs/openapi.yaml                        # 已含 health-summaries / health-repo
 | 下载 PDF（体检） | `GET /health-reports/{id}/export` → 打开 `download_url` |
 | 添加 / 编辑 / 删除子女 | `GET/POST /family/contacts`、`PATCH/DELETE /family/contacts/{id}` |
 | 推送权限与指标 | `GET/PUT /family/rules`（开关 + `abnormal_metrics`）；联系人 `notify_enabled` |
+| 子女查看父母报告 | `GET /family/parents` → 选择父母 → 总结/体检/就诊列表加 `owner_user_id`；详情 GET 服务端校验真实归属 |
 | 个人中心其它 | `GET/PATCH /me`（含邮箱）、`/me/preferences`、`POST /auth/password`、`POST /auth/logout` |
 
 前端调用入口：

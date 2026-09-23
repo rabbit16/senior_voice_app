@@ -195,7 +195,6 @@ export default function HomeScreen() {
         const spoken = sanitizeQaSpokenText(state.streamed.raw);
         if (spoken) {
           setResult(spoken);
-          setProcessing(false);
         }
       },
       onDone: final => {
@@ -516,20 +515,23 @@ export default function HomeScreen() {
         <Text style={styles.title}>{text('zh', 'title')}</Text>
         <Text style={styles.subtitle}>{text('zh', 'subtitle')}</Text>
 
-        <View style={styles.quickList}>
-          {quickQuestions.map((key, index) => (
-            <Pressable
-              key={key}
-              accessibilityRole="button"
-              onPress={() => {
-                setSymptomText(text('zh', key));
-                setInputMode('text');
-                setError('');
-              }}
-              style={[styles.quickChip, index === 1 && styles.quickChipGreen]}>
-              <Text style={styles.quickText}>{text('zh', key)}</Text>
-            </Pressable>
-          ))}
+        <View style={styles.quickSection}>
+          <Text style={styles.quickHeading}>{text('zh', 'quickQuestionsTitle')}</Text>
+          <View style={styles.quickList}>
+            {quickQuestions.map((key, index) => (
+              <Pressable
+                key={key}
+                accessibilityRole="button"
+                onPress={() => {
+                  setSymptomText(text('zh', key));
+                  setInputMode('text');
+                  setError('');
+                }}
+                style={[styles.quickChip, index === 1 && styles.quickChipGreen]}>
+                <Text style={styles.quickText}>{text('zh', key)}</Text>
+              </Pressable>
+            ))}
+          </View>
         </View>
 
         <View style={styles.inputPanel}>
@@ -622,6 +624,12 @@ export default function HomeScreen() {
         ) : result ? (
           <>
             <ResultCard key={contextId ?? 'qa-result'} lang="zh" content={result} phase={phase} />
+            {processing ? (
+              <View style={styles.streamStatus} accessibilityLiveRegion="polite">
+                <ActivityIndicator size="small" color={colors.primary} />
+                <Text style={styles.processingText}>{text('zh', 'streamingAnswer')}</Text>
+              </View>
+            ) : null}
             {phase === 'followup' ? (
               <Text style={styles.followupCue}>{text('zh', 'followupCue')}</Text>
             ) : null}
@@ -691,7 +699,20 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: spacing.sm,
   },
-  quickList: {gap: spacing.sm, marginTop: spacing.lg},
+  quickSection: {
+    marginTop: spacing.xl,
+    padding: spacing.lg,
+    borderRadius: radius.xl,
+    backgroundColor: colors.surfaceBlue,
+    borderWidth: 1,
+    borderColor: colors.borderNeutral,
+  },
+  quickHeading: {
+    ...typography.bodyStrong,
+    color: colors.primaryDark,
+    fontSize: moderateScale(18),
+  },
+  quickList: {gap: spacing.sm, marginTop: spacing.md},
   quickChip: {
     backgroundColor: colors.surfaceBlue,
     borderRadius: radius.md,
@@ -779,6 +800,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.lg,
   },
   processingText: {fontSize: moderateScale(17), color: colors.textSecondary, marginTop: spacing.md},
+  streamStatus: {flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, marginTop: spacing.sm},
   emptyCard: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,

@@ -87,7 +87,7 @@ export async function ocrArchiveImage(
 
 export async function listArchives(
   token: string,
-  query?: {q?: string; page?: number; page_size?: number},
+  query?: {q?: string; page?: number; page_size?: number; owner_user_id?: string},
 ): Promise<ArchiveListResponse> {
   return apiRequest({
     method: 'GET',
@@ -256,11 +256,15 @@ export type HealthSummaryListResponse = {
 };
 
 /** 档案首页：健康问题总结列表（含条目） */
-export async function listHealthSummaries(token: string): Promise<HealthSummaryListResponse> {
+export async function listHealthSummaries(
+  token: string,
+  ownerUserId?: string,
+): Promise<HealthSummaryListResponse> {
   return apiRequest({
     method: 'GET',
     path: '/health-summaries',
     token,
+    query: ownerUserId ? {owner_user_id: ownerUserId} : undefined,
   });
 }
 
@@ -309,7 +313,7 @@ export type HealthReportDetail = HealthReportListItem & {
 /** 报告时间轴列表 */
 export async function listHealthReports(
   token: string,
-  query?: {page?: number; page_size?: number},
+  query?: {page?: number; page_size?: number; owner_user_id?: string},
 ): Promise<HealthReportListResponse> {
   return apiRequest({
     method: 'GET',

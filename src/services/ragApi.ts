@@ -182,12 +182,13 @@ function unwrapQueryData(data: unknown, query: string): RagQueryResult {
 }
 
 function parseSseChunk(buffer: string): {events: SseEvent[]; rest: string} {
-  const parts = buffer.split(/\n\n/);
+  // SSE frames are allowed to use either LF or CRLF line endings.
+  const parts = buffer.split(/\r?\n\r?\n/);
   const rest = parts.pop() ?? '';
   const events: SseEvent[] = [];
   for (const part of parts) {
     const dataLines = part
-      .split(/\n/)
+      .split(/\r?\n/)
       .filter(line => line.startsWith('data:'))
       .map(line => line.slice(5).trimStart());
     if (!dataLines.length) {
@@ -477,6 +478,7 @@ async function consumeRagSse(
     while (true) {
       const {done, value} = await reader.read();
       if (done) {
+        buffer += decoder.decode();
         break;
       }
       buffer += decoder.decode(value, {stream: true});

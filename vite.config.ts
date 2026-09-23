@@ -37,6 +37,11 @@ export default defineConfig({
   },
   server: {
     host: '0.0.0.0',
+    // Linux 环境可能受 inotify 配额限制；轮询避免 Vite 因 EMFILE 无法启动
+    watch: {
+      usePolling: true,
+      interval: 1000,
+    },
     // HTTPS 页面只访问本站；下面代理再转到 http 后端，避免混合内容
     proxy: {
       '/rag': sseProxy(env.ragBaseUrl, {
