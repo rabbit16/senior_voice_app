@@ -30,7 +30,7 @@ npm install
 npm run check
 ```
 
-一键生成 Android Debug APK：
+一键生成 Android Release APK：
 
 ```bash
 npm run build:android
@@ -39,8 +39,10 @@ npm run build:android
 APK 输出路径：
 
 ```text
-android/app/build/outputs/apk/debug/app-debug.apk
+android/app/build/outputs/apk/release/app-release.apk
 ```
+
+交付交接、换机器打包、改后端地址：请先读 [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md)。
 
 ## 运行到安卓手机
 
@@ -66,12 +68,13 @@ npm start
 
 ## 重要文档
 
-换对话或后续维护时，优先阅读：
-
 ```text
+docs/MAINTENANCE.md          交付维护：环境、构建、关键代码、重新打包（优先读这份）
 docs/PROJECT_CONTEXT.md      项目背景和设计目标
 docs/DESIGN_SYSTEM.md        适老化设计系统
-docs/DEVELOPMENT_GUIDE.md    开发与维护指南
+docs/DEVELOPMENT_GUIDE.md    开发联调速查
+docs/API.md                  主后端接口契约
+docs/API_rag.md              RAG 就医推荐契约
 docs/ROADMAP.md              后续开发路线图
 ```
 
