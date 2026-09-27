@@ -15,15 +15,12 @@ type Props = {
   onLogout: () => void;
 };
 
-const seniorTabs: Tab[] = ['inquiry', 'archive', 'profile'];
+const tabs: Tab[] = ['inquiry', 'archive', 'parentReports', 'profile'];
 
 export default function MainTabs({phone, onLogout}: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('inquiry');
   const [familyParents, setFamilyParents] = useState<FamilyParent[]>([]);
   const [familyLookupFailed, setFamilyLookupFailed] = useState(false);
-  // Always expose the entry point; if the backend lookup fails, the page explains the issue
-  // instead of silently hiding the feature from the child account.
-  const tabs: Tab[] = [...seniorTabs, 'parentReports'];
 
   useEffect(() => {
     const token = getAccessToken();

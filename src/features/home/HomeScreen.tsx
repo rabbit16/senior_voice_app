@@ -83,7 +83,6 @@ export default function HomeScreen() {
   const [contextId, setContextId] = useState<string | null>(null);
   const [forceNewContext, setForceNewContext] = useState(false);
   const [phase, setPhase] = useState<QaPhase | undefined>(undefined);
-  const [intakeComplete, setIntakeComplete] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const recommendAbortRef = useRef<AbortController | null>(null);
   const recordingRef = useRef(false);
@@ -162,9 +161,6 @@ export default function HomeScreen() {
     if (final.phase) {
       setPhase(final.phase);
     }
-    setIntakeComplete(
-      Boolean(final.intake_complete || final.phase === 'diagnosis' || final.phase === 'emergency'),
-    );
     const spoken = sanitizeQaSpokenText(final.answer_text) || streamedSpoken;
     if (spoken) {
       pushDialogue('assistant', spoken);
@@ -188,7 +184,6 @@ export default function HomeScreen() {
       },
       onPhase: nextPhase => {
         setPhase(nextPhase);
-        setIntakeComplete(nextPhase === 'diagnosis' || nextPhase === 'emergency');
       },
       onToken: delta => {
         state.streamed.raw += delta;
@@ -409,6 +404,7 @@ export default function HomeScreen() {
 
     const query = buildTriageQuery({
       turns: dialogueRef.current,
+      questions: [symptomText, result].filter(Boolean),
       diagnosis: result,
     });
     if (!query) {
@@ -493,7 +489,6 @@ export default function HomeScreen() {
     setForceNewContext(true);
     setContextId(null);
     setPhase(undefined);
-    setIntakeComplete(false);
     dialogueRef.current = [];
     setInputMode('text');
 
@@ -633,31 +628,29 @@ export default function HomeScreen() {
             {phase === 'followup' ? (
               <Text style={styles.followupCue}>{text('zh', 'followupCue')}</Text>
             ) : null}
-            {phase !== 'followup' && phase !== 'emergency' ? (
-              <View style={styles.resultActions}>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={handleContinue}
-                  style={styles.secondaryAction}>
-                  <Text style={styles.secondaryActionText}>{text('zh', 'continueInquiry')}</Text>
-                </Pressable>
-                {phase === 'diagnosis' || intakeComplete || !phase ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={handleMedicalRecommend}
-                    style={styles.primaryAction}>
-                    <Text style={styles.primaryActionText}>{text('zh', 'medicalRecommend')}</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-            ) : null}
+            <View style={styles.resultActions}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={handleContinue}
+                style={styles.secondaryAction}>
+                <Text style={styles.secondaryActionText}>{text('zh', 'continueInquiry')}</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{disabled: recommendationLoading}}
+                disabled={recommendationLoading}
+                onPress={handleMedicalRecommend}
+                style={[styles.primaryAction, recommendationLoading && styles.disabledAction]}>
+                <Text style={styles.primaryActionText}>{text('zh', 'medicalRecommend')}</Text>
+              </Pressable>
+            </View>
             <Pressable
               accessibilityRole="button"
               onPress={handleNewQuestion}
               style={styles.newQuestionButton}>
               <Text style={styles.newQuestionText}>{text('zh', 'newQuestion')}</Text>
             </Pressable>
-            {showRecommendation && phase !== 'followup' && phase !== 'emergency' ? (
+            {showRecommendation ? (
               <RecommendationCard
                 lang="zh"
                 loading={recommendationLoading}
@@ -846,6 +839,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: spacing.sm,
   },
+  disabledAction: {opacity: 0.6},
   primaryActionText: {
     ...typography.bodyStrong,
     color: colors.surface,
