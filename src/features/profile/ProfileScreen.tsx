@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import {isValidEmail, isValidPassword, isValidPhone, maskEmail, normalizeEmail, normalizePhone} from '../../shared/auth/validators';
 import {text} from '../../shared/i18n/messages';
-import {changePassword, updateMe} from '../../services/authApi';
+import {changePassword, getMe, updateMe} from '../../services/authApi';
 import {
   ABNORMAL_METRICS,
   asBool,
@@ -85,8 +85,14 @@ function emptyDraft(relation: FamilyRelation = 'daughter'): {
 export default function ProfileScreen({phone, onLogout}: Props) {
   const [showPassword, setShowPassword] = useState(false);
   const [showEmail, setShowEmail] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   const [accountEmail, setAccountEmail] = useState(getSession()?.user.email || '');
+  const [displayName, setDisplayName] = useState(
+    (getSession()?.user.display_name || '').trim(),
+  );
+  const [nameDraft, setNameDraft] = useState(displayName);
   const [emailDraft, setEmailDraft] = useState(accountEmail);
+  const [profileSaving, setProfileSaving] = useState(false);
   const [emailSaving, setEmailSaving] = useState(false);
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -158,6 +164,37 @@ export default function ProfileScreen({phone, onLogout}: Props) {
   useEffect(() => {
     loadFamily();
   }, [loadFamily]);
+
+  useEffect(() => {
+    const token = getAccessToken();
+    if (isDemoToken(token)) {
+      setDisplayName((getSession()?.user.display_name || '').trim());
+      return;
+    }
+    let mounted = true;
+    getMe(token!)
+      .then(user => {
+        if (!mounted) {
+          return;
+        }
+        const name = (user.display_name || '').trim();
+        setDisplayName(name);
+        setNameDraft(name);
+        if (user.email) {
+          setAccountEmail(user.email);
+        }
+        const session = getSession();
+        if (session) {
+          setSession({...session, user: {...session.user, ...user}});
+        }
+      })
+      .catch(() => {
+        // 个人中心仍可用本地会话里的昵称
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [phone]);
 
   function persistDemo(nextContacts: FamilyContact[], nextRules: PushRules) {
     saveDemoFamily({contacts: nextContacts, rules: nextRules});
@@ -455,6 +492,42 @@ export default function ProfileScreen({phone, onLogout}: Props) {
     }
   }
 
+  async function handleSaveProfile() {
+    const nextName = nameDraft.trim();
+    const token = getAccessToken();
+    setProfileSaving(true);
+    setError('');
+    try {
+      if (isDemoToken(token)) {
+        const session = getSession();
+        if (session) {
+          setSession({
+            ...session,
+            user: {...session.user, display_name: nextName || null},
+          });
+        }
+        setDisplayName(nextName);
+        setNotice(text('zh', 'profileUpdated'));
+        setShowProfile(false);
+        return;
+      }
+      const user = await updateMe(token!, {display_name: nextName || null});
+      const session = getSession();
+      if (session) {
+        setSession({...session, user: {...session.user, ...user}});
+      }
+      const savedName = (user.display_name || '').trim();
+      setDisplayName(savedName);
+      setNameDraft(savedName);
+      setNotice(text('zh', 'profileUpdated'));
+      setShowProfile(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : text('zh', 'profileSaveFailed'));
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
   async function handleSaveEmail() {
     const nextEmail = normalizeEmail(emailDraft);
     if (!nextEmail) {
@@ -511,12 +584,53 @@ export default function ProfileScreen({phone, onLogout}: Props) {
           <View style={styles.avatarBody} />
         </View>
         <View style={styles.accountText}>
+          <Text style={styles.displayName}>{displayName || text('zh', 'displayNameUnset')}</Text>
           <Text style={styles.cardTitle}>{text('zh', 'accountInfo')}</Text>
-          <Text style={styles.bodyText}>{maskedPhone}</Text>
           <Text style={styles.bodyText}>
+            {text('zh', 'phoneLabel')}：{maskedPhone}
+          </Text>
+          <Text style={styles.bodyText}>
+            {text('zh', 'emailLabel')}：
             {accountEmail ? maskEmail(accountEmail) : text('zh', 'emailPlaceholder')}
           </Text>
         </View>
+      </View>
+
+      <View style={styles.card}>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => {
+            setShowProfile(!showProfile);
+            setNameDraft(displayName);
+          }}
+          style={styles.rowButton}>
+          <Text style={styles.cardTitle}>{text('zh', 'changeProfile')}</Text>
+          <Text style={styles.chevron}>{showProfile ? '−' : '+'}</Text>
+        </Pressable>
+        {showProfile ? (
+          <View>
+            <Text style={styles.fieldLabel}>{text('zh', 'displayNameLabel')}</Text>
+            <TextInput
+              accessibilityLabel={text('zh', 'displayNameLabel')}
+              value={nameDraft}
+              onChangeText={setNameDraft}
+              placeholder={text('zh', 'displayNamePlaceholder')}
+              placeholderTextColor={colors.textMuted}
+              style={styles.fieldInput}
+            />
+            <Pressable
+              accessibilityRole="button"
+              disabled={profileSaving}
+              onPress={handleSaveProfile}
+              style={[styles.primaryButton, profileSaving && styles.disabledButton]}>
+              {profileSaving ? (
+                <ActivityIndicator color={colors.surface} />
+              ) : (
+                <Text style={styles.primaryText}>{text('zh', 'saveProfile')}</Text>
+              )}
+            </Pressable>
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.card}>
@@ -892,6 +1006,12 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   accountText: {flex: 1},
+  displayName: {
+    ...typography.cardTitle,
+    color: colors.primaryDark,
+    fontSize: 22,
+    marginBottom: spacing.xs,
+  },
   card: {
     backgroundColor: colors.surface,
     borderRadius: radius.xl,

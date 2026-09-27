@@ -637,19 +637,18 @@ const DEMO_ARCHIVES: ArchiveRecord[] = [
 
 type ArchiveScreenProps = {
   familyViewOnly?: boolean;
-  initialParentId?: string;
   familyLookupFailed?: boolean;
 };
 
 export default function ArchiveScreen({
   familyViewOnly = false,
-  initialParentId,
   familyLookupFailed = false,
 }: ArchiveScreenProps) {
   const [mode, setMode] = useState<ViewMode>(familyViewOnly ? 'reports' : 'home');
   const [summaries, setSummaries] = useState<HealthSummary[]>([]);
   const [reports, setReports] = useState<HealthReportListItem[]>([]);
   const [visits, setVisits] = useState<ArchiveRecord[]>([]);
+  const [familyTimeline, setFamilyTimeline] = useState<TimelineItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<SelectedItem | null>(null);
   const [reportDetail, setReportDetail] = useState<HealthReportDetail | null>(null);
   const [visitDetail, setVisitDetail] = useState<ArchiveRecord | null>(null);
@@ -661,7 +660,7 @@ export default function ArchiveScreen({
   const [error, setError] = useState('');
   const [demoMode, setDemoMode] = useState(false);
   const [familyParents, setFamilyParents] = useState<FamilyParent[]>([]);
-  const [selectedParentId, setSelectedParentId] = useState<string | null>(initialParentId || null);
+  const [selectedParentId, setSelectedParentId] = useState<string | null>(null);
 
   const [recognizing, setRecognizing] = useState(false);
   const [ocrDraft, setOcrDraft] = useState<OcrDraft>(emptyDraft());
@@ -726,29 +725,12 @@ export default function ArchiveScreen({
   }, [refreshCachedFlag, mode]);
 
   const loadHome = useCallback(async () => {
-    if (familyViewOnly && (!initialParentId || familyLookupFailed)) {
-      setSummaries([]);
-      setReports([]);
-      setVisits([]);
-      setError(
-        familyLookupFailed
-          ? text('zh', 'familyParentsLoadFailed')
-          : text('zh', 'familyParentsEmpty'),
-      );
+    if (familyViewOnly) {
       setHomeLoading(false);
       return;
     }
     const token = getAccessToken();
     if (isDemoToken(token)) {
-      if (familyViewOnly) {
-        setDemoMode(false);
-        setSummaries([]);
-        setReports([]);
-        setVisits([]);
-        setError(text('zh', 'archiveNeedLogin'));
-        setHomeLoading(false);
-        return;
-      }
       setDemoMode(true);
       setSummaries(DEMO_SUMMARIES);
       setReports(DEMO_REPORTS);
@@ -763,17 +745,9 @@ export default function ArchiveScreen({
     setError('');
     try {
       const [summaryResult, reportResult, archiveResult] = await Promise.allSettled([
-        listHealthSummaries(token!, familyViewOnly ? initialParentId : undefined),
-        listHealthReports(token!, {
-          page: 1,
-          page_size: 100,
-          ...(familyViewOnly && initialParentId ? {owner_user_id: initialParentId} : {}),
-        }),
-        listArchives(token!, {
-          page: 1,
-          page_size: 100,
-          ...(familyViewOnly && initialParentId ? {owner_user_id: initialParentId} : {}),
-        }),
+        listHealthSummaries(token!),
+        listHealthReports(token!, {page: 1, page_size: 100}),
+        listArchives(token!, {page: 1, page_size: 100}),
       ]);
       const summaryItems =
         summaryResult.status === 'fulfilled' ? summaryResult.value.items || [] : [];
@@ -802,30 +776,87 @@ export default function ArchiveScreen({
     } finally {
       setHomeLoading(false);
     }
-  }, [familyLookupFailed, familyViewOnly, initialParentId]);
+  }, [familyViewOnly]);
 
   const loadReports = useCallback(async (ownerUserId: string | null = selectedParentId) => {
-    if (familyViewOnly && (!ownerUserId || familyLookupFailed)) {
-      setReports([]);
-      setVisits([]);
-      setError(
-        familyLookupFailed
-          ? text('zh', 'familyParentsLoadFailed')
-          : text('zh', 'familyParentsEmpty'),
-      );
-      setReportsLoading(false);
-      return;
-    }
     const token = getAccessToken();
-    if (isDemoToken(token)) {
-      if (familyViewOnly) {
-        setDemoMode(false);
-        setReports([]);
-        setVisits([]);
+    if (familyViewOnly) {
+      if (familyLookupFailed) {
+        setFamilyTimeline([]);
+        setError(text('zh', 'familyParentsLoadFailed'));
+        setReportsLoading(false);
+        return;
+      }
+      if (isDemoToken(token)) {
+        setFamilyTimeline([]);
         setError(text('zh', 'archiveNeedLogin'));
         setReportsLoading(false);
         return;
       }
+
+      setDemoMode(false);
+      setReportsLoading(true);
+      setError('');
+      try {
+        let parents = familyParents;
+        if (!parents.length) {
+          const result = await listFamilyParents(token!);
+          parents = result.items || [];
+          setFamilyParents(parents);
+        }
+        if (!parents.length) {
+          setFamilyTimeline([]);
+          setError(text('zh', 'familyParentsEmpty'));
+          return;
+        }
+
+        const batches = await Promise.all(
+          parents.map(async parent => {
+            const [reportResult, archiveResult] = await Promise.allSettled([
+              listHealthReports(token!, {
+                page: 1,
+                page_size: 100,
+                owner_user_id: parent.id,
+              }),
+              listArchives(token!, {
+                page: 1,
+                page_size: 100,
+                owner_user_id: parent.id,
+              }),
+            ]);
+            const reportItems =
+              reportResult.status === 'fulfilled' ? reportResult.value.items || [] : [];
+            const visitItems =
+              archiveResult.status === 'fulfilled' ? archiveResult.value.items || [] : [];
+            const ownerName = parent.display_name || parent.phone;
+            return mergeTimeline(reportItems, visitItems, ownerName, parent.relation).map(item => ({
+              ...item,
+              key: `${parent.id}:${item.key}`,
+            }));
+          }),
+        );
+        const merged = batches.flat();
+        merged.sort((a, b) => {
+          const byDate = formatDate(b.date).localeCompare(formatDate(a.date));
+          if (byDate !== 0) {
+            return byDate;
+          }
+          return a.key.localeCompare(b.key);
+        });
+        setFamilyTimeline(merged);
+        if (!merged.length) {
+          setError('');
+        }
+      } catch (err) {
+        setFamilyTimeline([]);
+        setError(err instanceof ApiError ? err.message : text('zh', 'archiveLoadFailed'));
+      } finally {
+        setReportsLoading(false);
+      }
+      return;
+    }
+
+    if (isDemoToken(token)) {
       setDemoMode(true);
       setReports(DEMO_REPORTS);
       setVisits(prev => (prev.length ? prev : DEMO_ARCHIVES));
@@ -869,7 +900,7 @@ export default function ArchiveScreen({
     } finally {
       setReportsLoading(false);
     }
-  }, [familyLookupFailed, familyViewOnly, selectedParentId]);
+  }, [familyLookupFailed, familyParents, familyViewOnly, selectedParentId]);
 
   const loadFamilyParentOptions = useCallback(async () => {
     if (familyLookupFailed) {
@@ -1591,7 +1622,7 @@ export default function ArchiveScreen({
               </View>
             )}
 
-            {selectedParentId ? null : (
+            {familyViewOnly ? null : (
               <>
                 <View style={styles.actionRow}>
                   <Pressable
@@ -1643,37 +1674,35 @@ export default function ArchiveScreen({
   }
 
   if (mode === 'reports') {
-    const viewedParent = familyParents.find(parent => parent.id === selectedParentId);
-    const timeline = mergeTimeline(
-      reports,
-      visits,
-      familyViewOnly ? viewedParent?.display_name || viewedParent?.phone : undefined,
-      familyViewOnly ? viewedParent?.relation : undefined,
-    );
+    const timeline = familyViewOnly
+      ? familyTimeline
+      : mergeTimeline(reports, visits);
     return (
       <ScrollView style={styles.page} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         {familyViewOnly ? null : (
           <BackButton label={text('zh', 'backToArchive')} onPress={() => setMode('home')} />
         )}
-        <Text style={styles.title}>{text('zh', 'healthArchiveReport')}</Text>
-        <Text style={styles.subtitle}>{text('zh', 'reportListSubtitle')}</Text>
+        <Text style={styles.title}>
+          {text('zh', familyViewOnly ? 'parentReports' : 'healthArchiveReport')}
+        </Text>
+        <Text style={styles.subtitle}>
+          {text('zh', familyViewOnly ? 'familyReportListSubtitle' : 'reportListSubtitle')}
+        </Text>
 
-        {familyParents.length ? (
+        {!familyViewOnly && familyParents.length ? (
           <View style={styles.parentSelector}>
             <Text style={styles.parentSelectorLabel}>{text('zh', 'viewingParent')}</Text>
             <View style={styles.parentSelectorOptions}>
-              {!familyViewOnly ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityState={{selected: selectedParentId === null}}
-                  onPress={() => setSelectedParentId(null)}
-                  style={[styles.parentChip, selectedParentId === null && styles.parentChipActive]}>
-                  <Text style={[styles.parentChipText, selectedParentId === null && styles.parentChipTextActive]}>
-                    {text('zh', 'myReports')}
-                  </Text>
-                </Pressable>
-              ) : null}
-              {familyParents.filter(parent => !familyViewOnly || parent.id === initialParentId).map(parent => {
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{selected: selectedParentId === null}}
+                onPress={() => setSelectedParentId(null)}
+                style={[styles.parentChip, selectedParentId === null && styles.parentChipActive]}>
+                <Text style={[styles.parentChipText, selectedParentId === null && styles.parentChipTextActive]}>
+                  {text('zh', 'myReports')}
+                </Text>
+              </Pressable>
+              {familyParents.map(parent => {
                 const active = selectedParentId === parent.id;
                 return (
                   <Pressable

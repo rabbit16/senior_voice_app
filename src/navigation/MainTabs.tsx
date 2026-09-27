@@ -3,7 +3,7 @@ import {Pressable, SafeAreaView, StyleSheet, Text, View} from 'react-native';
 import ArchiveScreen from '../features/archive/ArchiveScreen';
 import HomeScreen from '../features/home/HomeScreen';
 import ProfileScreen from '../features/profile/ProfileScreen';
-import {listFamilyParents, type FamilyParent} from '../services/profileApi';
+import {listFamilyParents} from '../services/profileApi';
 import {getAccessToken} from '../services/session';
 import {text} from '../shared/i18n/messages';
 import {colors, radius, spacing, touch, typography} from '../theme/tokens';
@@ -19,27 +19,23 @@ const tabs: Tab[] = ['inquiry', 'archive', 'parentReports', 'profile'];
 
 export default function MainTabs({phone, onLogout}: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('inquiry');
-  const [familyParents, setFamilyParents] = useState<FamilyParent[]>([]);
   const [familyLookupFailed, setFamilyLookupFailed] = useState(false);
 
   useEffect(() => {
     const token = getAccessToken();
     if (!token || token.startsWith('demo-')) {
-      setFamilyParents([]);
       setFamilyLookupFailed(false);
       return;
     }
     let mounted = true;
     listFamilyParents(token)
-      .then(result => {
+      .then(() => {
         if (mounted) {
-          setFamilyParents(result.items || []);
           setFamilyLookupFailed(false);
         }
       })
       .catch(() => {
         if (mounted) {
-          setFamilyParents([]);
           setFamilyLookupFailed(true);
         }
       });
@@ -54,12 +50,7 @@ export default function MainTabs({phone, onLogout}: Props) {
         {activeTab === 'inquiry' && <HomeScreen />}
         {activeTab === 'archive' && <ArchiveScreen />}
         {activeTab === 'parentReports' ? (
-          <ArchiveScreen
-            key={`parent-reports-${familyParents[0]?.id || phone}`}
-            familyViewOnly
-            initialParentId={familyParents[0]?.id}
-            familyLookupFailed={familyLookupFailed}
-          />
+          <ArchiveScreen familyViewOnly familyLookupFailed={familyLookupFailed} />
         ) : null}
         {activeTab === 'profile' && <ProfileScreen phone={phone} onLogout={onLogout} />}
       </View>
@@ -73,10 +64,7 @@ export default function MainTabs({phone, onLogout}: Props) {
               accessibilityState={{selected: active}}
               accessibilityLabel={text('zh', tab)}
               onPress={() => setActiveTab(tab)}
-              style={[
-                styles.tabButton,
-                active && styles.activeTab,
-              ]}>
+              style={[styles.tabButton, active && styles.activeTab]}>
               <Text style={[styles.tabText, active && styles.activeText]}>{text('zh', tab)}</Text>
             </Pressable>
           );
